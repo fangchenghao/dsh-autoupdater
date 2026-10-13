@@ -60,7 +60,7 @@ dsh plugin --profile web add github:<owner>/dsh-autoupdater
 - 配置了 `systemdUnit`（或自动探测到）→ `sudo -n systemctl restart <unit>`。**前置条件**：你的部署用户已配置该命令的 sudoers 免密，例如：
 
   ```
-  ban ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart dsh-web
+  youruser ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart your-dsh-service
   ```
 
   未配置免密时 sudo 会失败，日志里如实记录，插件不会反复重试
