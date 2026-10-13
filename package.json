@@ -1,0 +1,48 @@
+{
+  "name": "dsh-autoupdater",
+  "version": "0.3.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Scheduled update checks for DSH itself and installed plugins, applied only in idle windows. Four schedule modes, dual-direction whitelist, web settings panel under the plugin manager.",
+  "icon": "./icon.svg",
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "auto-update",
+    "plugin-manager"
+  ],
+  "exports": {
+    ".": "./main.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "main": "./main.js",
+  "files": [
+    "main.js",
+    "client.js",
+    "apply-update.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  }
+}

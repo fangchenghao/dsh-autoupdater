@@ -1,0 +1,35 @@
+- insert:
+    - id: dsh-autoupdater
+      name: dsh-autoupdater
+      config:
+        # ── 调度 ──
+        # scheduleMode: daily | everyHours | everyDays | everyMinutes
+        scheduleMode: daily
+        # daily / everyDays 的锚定时刻（本机时区，24h 格式）
+        dailyTime: "04:30"
+        # 每 N 小时（整点对齐）
+        everyHours: 6
+        # 每 N 天（锚定 dailyTime）
+        everyDays: 1
+        # 每 N 分钟
+        everyMinutes: 60
+        # ── 空闲门槛 ──
+        # 判定"无人使用"所需的持续静默秒数（会话日志无写入）
+        idleSeconds: 300
+        # 每次检查最多等待空闲的时间（分钟），超过则本轮放弃
+        idleTimeoutMinutes: 120
+        verbose: true
+        # ── DSH 本体 ──
+        # off = 不管本体 | notify = 只暂存+通知（默认，保守） | auto = 宽限后自动重启
+        harnessMode: notify
+        # auto 模式下通知后的宽限分钟数；期间有任何会话活动即推迟
+        graceMinutes: 30
+        distTag: latest
+        # systemd 服务名（重启 DSH 用）。留空 = 自动探测
+        systemdUnit: ""
+        # ── 插件 ──
+        # regexmode-ignore：白名单内的只提醒，其余自动升级（默认）
+        # whitelist-auto：白名单内的自动升级，其余只提醒
+        # auto-all / notify-all / off
+        pluginMode: regexmode-ignore
+        whitelist: []
