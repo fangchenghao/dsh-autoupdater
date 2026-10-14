@@ -289,7 +289,38 @@ export function apply(ctx, rawConfig = {}) {
     return '';
   }
 
+  /** 直接执行 systemd 重启（插件更新场景：无需 npm install，只激活磁盘上的新版本）。
+   *  在主进程内同步执行；重启成功 = 本进程被杀，执行不到后续代码。 */
+  async function restartViaSystemd(unit) {
+    const { spawn } = await import('node:child_process');
+    const r = spawn('sudo', ['-n', 'systemctl', 'restart', unit], { detached: true, stdio: 'ignore' });
+    const code = await new Promise((res) => {
+      const t = setTimeout(() => res(-1), 20000);
+      r.on('close', (c) => { clearTimeout(t); res(c); });
+      r.on('error', () => { clearTimeout(t); res(-1); });
+    });
+    log(`systemctl restart ${unit} issued (exit=${code})`);
+    // systemd restart 对本进程是 SIGTERM：若 20s 后还活着（sudo 失败等），说明重启没发生
+    return code === 0;
+  }
+
   async function applyHarnessUpdateNow() {
+    const pendingExists = existsSync(pendingPath);
+    const unit = config.systemdUnit || detectSystemdUnit();
+
+    // 路径 A：仅插件更新（无 pending 文件）→ 无需 npm install，直接重启激活新插件
+    if (!pendingExists) {
+      log('no pending harness update — plugin-only restart');
+      await appendHistory({ kind: 'plugin-only-restart', unit });
+      if (unit) {
+        await restartViaSystemd(unit);
+        // 走到这里说明 sudo 失败/超时，进程还活着：记录并兜底裸退出让 systemd 判定
+        log('restart command did not take effect; falling back to detached child');
+      } else {
+        log('no systemd unit available; falling back to detached child');
+      }
+      // 兜底：交给子进程（它走安全重启路径：systemd 幂等重启或按 argv 拉起）
+    }
     const { spawn } = await import('node:child_process');
     const { fileURLToPath } = await import('node:url');
     const { dirname, join } = await import('node:path');
@@ -297,7 +328,12 @@ export function apply(ctx, rawConfig = {}) {
     const child = spawn(process.execPath, [self], {
       detached: true,
       stdio: 'ignore',
-      env: { ...process.env, AUTOUPDATE_STATE_DIR: stateDir },
+      env: {
+        ...process.env,
+        AUTOUPDATE_STATE_DIR: stateDir,
+        AUTOUPDATE_SYSTEMD_UNIT: unit,           // 安全重启路径用
+        AUTOUPDATE_ARGV: currentArgv().join('\0'), // 裸拉起兜底用
+      },
     });
     child.unref();
     log('detached apply child spawned, exiting for update');

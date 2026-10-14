@@ -19,9 +19,41 @@ function alog(msg) {
 
 alog(`child spawned, stateDir=${stateDir}`);
 
+// 无 pending 文件：不再静默退出（这是本次故障的根因路径）。
+// 可能是"仅插件更新"场景的兜底触发——执行幂等安全重启，确保服务活着。
 if (!stateDir || !existsSync(pendingPath)) {
-  alog('no pending-update.json, exit');
-  process.exit(0);
+  alog('no pending-update.json — idempotent safety restart path');
+  const unit = process.env.AUTOUPDATE_SYSTEMD_UNIT || '';
+  let restarted = false;
+  if (unit) {
+    try {
+      const r = spawn('sudo', ['-n', 'systemctl', 'restart', unit], { stdio: 'ignore' });
+      const code = await new Promise((res) => {
+        const t = setTimeout(() => res(-1), 20000);
+        r.on('close', (c) => { clearTimeout(t); res(c); });
+        r.on('error', () => { clearTimeout(t); res(-1); });
+      });
+      alog(`safety systemctl restart ${unit} exit=${code}`);
+      restarted = code === 0;
+    } catch (e) { alog(`safety restart threw: ${e.message}`); }
+  }
+  if (!restarted) {
+    // 兜底：用环境变量传递的原 argv 重新拉起 dsh web
+    const argv = (process.env.AUTOUPDATE_ARGV || '').split('\0').filter(Boolean);
+    const dshBin = argv[1] || null;
+    if (dshBin && existsSync(dshBin)) {
+      try {
+        const child = spawn(dshBin, argv.slice(2), { detached: true, stdio: 'ignore' });
+        child.unref();
+        alog(`fallback relaunch pid=${child.pid}`);
+        restarted = true;
+      } catch (e) { alog(`fallback relaunch failed: ${e.message}`); }
+    } else {
+      alog('no systemd unit and no usable argv — cannot relaunch (service stays down until manual start)');
+    }
+  }
+  alog(`safety path done (restarted=${restarted})`);
+  process.exit(restarted ? 0 : 1);
 }
 
 const instruction = JSON.parse(readFileSync(pendingPath, 'utf8'));
