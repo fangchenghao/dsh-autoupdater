@@ -259,7 +259,7 @@ export function apply(ctx, rawConfig = {}) {
           cb(null, [{ address: a2, family: f2 }]);
         });
       }
-      cb(null, addresses[0], 4);
+      cb(null, opts?.all ? [{ address: addresses[0], family: 4 }] : addresses[0], 4);
     });
   }
   // 查询源：npmmirror 为主（国内镜像，与官方数据同步，链路 0.3s），
