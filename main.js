@@ -268,8 +268,11 @@ export function apply(ctx, rawConfig = {}) {
         const cause = e?.cause?.code || e?.cause?.message || e?.message;
         log(`npm ${pkg} attempt ${attempt}/${attempts} FAILED after ${Date.now() - t0}ms: ${e.message} (cause: ${cause})`);
         if (attempt >= attempts) {
-          e.message = `${e.message} (cause: ${cause})`;
-          throw e;
+          // AbortError 等内部错误的 message 是只读 getter，直接赋值会抛 TypeError——
+          // 用包装错误携带 cause，保留原始类型信息
+          const wrapped = new Error(`npm ${pkg} failed: ${e.message} (cause: ${cause})`);
+          wrapped.cause = e;
+          throw wrapped;
         }
         await sleep(3000); // 退避后重试
       }
