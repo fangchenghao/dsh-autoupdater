@@ -253,7 +253,11 @@ export function apply(ctx, rawConfig = {}) {
     dnsMod.resolve4(hostname, (err, addresses) => {
       if (err || !addresses?.length) {
         // resolve4 失败（如 DNS 服务器只给 AAAA）：退回系统 lookup
-        return dnsMod.lookup(hostname, opts, cb);
+        // undici/net 以 {all:true} 调用 lookup 时回调需返回数组
+        return dnsMod.lookup(hostname, { ...opts, all: false, }, (e2, a2, f2) => {
+          if (e2) return cb(e2);
+          cb(null, [{ address: a2, family: f2 }]);
+        });
       }
       cb(null, addresses[0], 4);
     });
