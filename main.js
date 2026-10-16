@@ -222,6 +222,12 @@ export function apply(ctx, rawConfig = {}) {
     try {
       await mkdir(stateDir, { recursive: true });
       await appendFile(historyPath, JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n');
+      // 日志轮转：超过 500 条时保留最近 300 条（防止多年运行无限增长）
+      const raw = await readFile(historyPath, 'utf8').catch(() => '');
+      const lines = raw.split('\n').filter(Boolean);
+      if (lines.length > 500) {
+        await writeFile(historyPath, lines.slice(-300).join('\n') + '\n');
+      }
     } catch {}
   }
 
