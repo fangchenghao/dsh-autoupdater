@@ -342,14 +342,16 @@ export function apply(ctx, rawConfig = {}) {
   async function restartViaSystemd(unit) {
     const { spawn } = await import('node:child_process');
     const r = spawn('sudo', ['-n', 'systemctl', 'restart', unit], { detached: true, stdio: 'ignore' });
-    const code = await new Promise((res) => {
-      const t = setTimeout(() => res(-1), 20000);
-      r.on('close', (c) => { clearTimeout(t); res(c); });
-      r.on('error', () => { clearTimeout(t); res(-1); });
+    // 关键认知：restart 会先停止本服务 = 本进程被 SIGTERM，sudo 的 close 事件永远到不了，
+    // 不能等 close 判定成败。发出命令即可；进程随 restart 死亡 = 成功路径。
+    // 只有 sudo 本身失败（error 事件）或 10s 后进程还活着，才说明重启未发生。
+    r.on('error', (e) => log(`systemctl restart spawn error: ${e.message}`));
+    log(`systemctl restart ${unit} issued — process will die with the restart`);
+    await new Promise((res) => {
+      const t = setTimeout(() => res('still-alive'), 10000);
+      process.once('exit', () => res('exited'));
     });
-    log(`systemctl restart ${unit} issued (exit=${code})`);
-    // systemd restart 对本进程是 SIGTERM：若 20s 后还活着（sudo 失败等），说明重启没发生
-    return code === 0;
+    return 'issued';
   }
 
   async function applyHarnessUpdateNow() {
