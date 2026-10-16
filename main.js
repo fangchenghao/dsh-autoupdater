@@ -238,21 +238,23 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   // ---- npm 查询 ----
-  // 查询源可配置：默认 npmmirror（国内镜像，与官方数据同步，链路稳定 0.3s）；
-  // registry.npmjs.org（Cloudflare 海外）在国内链路劣化时会持续 CONNECT_TIMEOUT。
-  // 熔断：npmmirror 也失败（罕见）则退回官方源重试一次。
+  // 长驻进程内 undici 全局 dispatcher 的连接池/DNS 缓存会随网络抖动损坏，
+  // 表现为进程内持续 CONNECT_TIMEOUT 而新进程正常。对策：
+  // 每次查询使用全新 undici Agent（独立连接池，用完即弃），彻底隔离全局状态。
   import('undici').then((u) => { globalThis.__undiciAgentCtor = u.Agent; }).catch(() => {});
-  const REGISTRY_PRIMARY = 'https://registry.npmmirror.com';
-  const REGISTRY_FALLBACK = 'https://registry.npmjs.org';
+  // 查询源：npmmirror 为主（国内镜像，与官方数据同步，链路 0.3s），
+  // registry.npmjs.org（Cloudflare 海外）在国内链路劣化时会持续 CONNECT_TIMEOUT。
+  // 主源失败自动退回官方源。
+  const REGISTRIES = ['https://registry.npmmirror.com', 'https://registry.npmjs.org'];
   async function npmLatestVersion(pkg) {
-    const registries = [REGISTRY_PRIMARY, REGISTRY_FALLBACK];
-    for (const base of registries) {
+    for (const base of REGISTRIES) {
       const t0 = Date.now();
       try {
         const fetchOpts = {
           signal: AbortSignal.timeout(20000),
           headers: { accept: 'application/json' },
         };
+        // 全新 Agent = 全新连接池 + 全新 DNS 解析，不受进程历史污染
         if (globalThis.__undiciAgentCtor) {
           fetchOpts.dispatcher = new globalThis.__undiciAgentCtor({
             connect: { timeout: 15000 },
@@ -263,16 +265,15 @@ export function apply(ctx, rawConfig = {}) {
         const res = await fetch(`${base}/${encodeURIComponent(pkg)}`, fetchOpts);
         if (!res.ok) throw new Error(`${base} ${res.status}`);
         const data = await res.json();
-        const v = data?.['dist-tags']?.[config.distTag] ?? null;
-        if (config.verbose) log(`npm ${pkg}: ${Date.now() - t0}ms → ${v ?? 'null'} (${new URL(base).host})`);
-        return v;
+        if (config.verbose) log(`npm ${pkg}: ${Date.now() - t0}ms → ${data?.['dist-tags']?.[config.distTag] ?? 'null'} (${new URL(base).host})`);
+        return data?.['dist-tags']?.[config.distTag] ?? null;
       } catch (e) {
         const cause = e?.cause?.code || e?.cause?.message || e?.message;
         log(`npm ${pkg} via ${new URL(base).host} FAILED after ${Date.now() - t0}ms: ${e.message} (cause: ${cause})`);
-        // 主源失败 → 尝试 fallback；fallback 也失败 → 抛出（由熔断计数）
+        // 主源失败 → 退回下一源；全部失败 → 包装抛出
       }
     }
-    const wrapped = new Error(`all registries failed for ${pkg}`);
+    const wrapped = new Error(`npm ${pkg} failed: all registries failed`);
     throw wrapped;
   }
 
