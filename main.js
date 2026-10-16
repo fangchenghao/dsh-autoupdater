@@ -232,21 +232,38 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   // ---- npm 查询 ----
+  // 长驻进程的 undici 连接池可能持有坏 socket（keep-alive 复用已死连接），
+  // 表现为固定几秒后 "fetch failed" 且进程内持续复现而新进程正常。
+  // 对策：重试时改用 connection: close（禁用 keep-alive 复用），并打出真实 cause。
   async function npmLatestVersion(pkg) {
     const t0 = Date.now();
-    try {
-      const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, {
-        signal: AbortSignal.timeout(20000),
-        headers: { accept: 'application/vnd.npm.install-v1+json' }, // abridged 文档，快且小
-      });
-      if (!res.ok) throw new Error(`npm ${res.status}`);
-      const data = await res.json();
-      if (config.verbose) log(`npm ${pkg}: ${Date.now() - t0}ms → ${data?.['dist-tags']?.[config.distTag] ?? 'null'}`);
-      return data?.['dist-tags']?.[config.distTag] ?? null;
-    } catch (e) {
-      log(`npm ${pkg} FAILED after ${Date.now() - t0}ms: ${e.message}`);
-      throw e;
+    const attempts = 2;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const fetchOpts = {
+          signal: AbortSignal.timeout(20000),
+          headers: { accept: 'application/vnd.npm.install-v1+json' },
+        };
+        if (attempt > 1) {
+          // 重试：禁用 keep-alive 复用，强制新连接，绕开可能损坏的池化 socket
+          fetchOpts.headers['connection'] = 'close';
+        }
+        const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, fetchOpts);
+        if (!res.ok) throw new Error(`npm ${res.status}`);
+        const data = await res.json();
+        if (config.verbose) log(`npm ${pkg}: ${Date.now() - t0}ms → ${data?.['dist-tags']?.[config.distTag] ?? 'null'}${attempt > 1 ? ' (retry)' : ''}`);
+        return data?.['dist-tags']?.[config.distTag] ?? null;
+      } catch (e) {
+        const cause = e?.cause?.code || e?.cause?.message || e?.message;
+        log(`npm ${pkg} attempt ${attempt}/${attempts} FAILED after ${Date.now() - t0}ms: ${e.message} (cause: ${cause})`);
+        if (attempt >= attempts) {
+          e.message = `${e.message} (cause: ${cause})`;
+          throw e;
+        }
+        await sleep(3000); // 退避后重试
+      }
     }
+    return null;
   }
 
   function harnessPkgPath() {
@@ -332,7 +349,7 @@ export function apply(ctx, rawConfig = {}) {
         ...process.env,
         AUTOUPDATE_STATE_DIR: stateDir,
         AUTOUPDATE_SYSTEMD_UNIT: unit,           // 安全重启路径用
-        AUTOUPDATE_ARGV: currentArgv().join('\0'), // 裸拉起兜底用
+        AUTOUPDATE_ARGV: currentArgv().join(' '), // 裸拉起兜底用（空格分隔；env 值不允许 null byte）
       },
     });
     child.unref();

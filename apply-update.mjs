@@ -38,8 +38,8 @@ if (!stateDir || !existsSync(pendingPath)) {
     } catch (e) { alog(`safety restart threw: ${e.message}`); }
   }
   if (!restarted) {
-    // 兜底：用环境变量传递的原 argv 重新拉起 dsh web
-    const argv = (process.env.AUTOUPDATE_ARGV || '').split('\0').filter(Boolean);
+    // 兜底：用环境变量传递的原 argv 重新拉起 dsh web（空格分隔；含路径含空格的安装不适用，属已知限制）
+    const argv = (process.env.AUTOUPDATE_ARGV || '').trim().split(/\s+/).filter(Boolean);
     const dshBin = argv[1] || null;
     if (dshBin && existsSync(dshBin)) {
       try {
