@@ -242,14 +242,17 @@ export function apply(ctx, rawConfig = {}) {
   // 表现为进程内持续 CONNECT_TIMEOUT 而新进程正常。对策：
   // 每次查询使用全新 undici Agent（独立连接池，用完即弃），彻底隔离全局状态。
   import('undici').then((u) => { globalThis.__undiciAgentCtor = u.Agent; }).catch(() => {});
+  // 查询源：npmmirror 为主（国内镜像，与官方数据同步，链路 0.3s），
+  // registry.npmjs.org（Cloudflare 海外）在国内链路劣化时会持续 CONNECT_TIMEOUT。
+  // 主源失败自动退回官方源。
+  const REGISTRIES = ['https://registry.npmmirror.com', 'https://registry.npmjs.org'];
   async function npmLatestVersion(pkg) {
-    const t0 = Date.now();
-    const attempts = 2;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
+    for (const base of REGISTRIES) {
+      const t0 = Date.now();
       try {
         const fetchOpts = {
           signal: AbortSignal.timeout(20000),
-          headers: { accept: 'application/vnd.npm.install-v1+json' },
+          headers: { accept: 'application/json' },
         };
         // 全新 Agent = 全新连接池 + 全新 DNS 解析，不受进程历史污染
         if (globalThis.__undiciAgentCtor) {
@@ -259,25 +262,19 @@ export function apply(ctx, rawConfig = {}) {
             headersTimeout: 20000,
           });
         }
-        const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, fetchOpts);
-        if (!res.ok) throw new Error(`npm ${res.status}`);
+        const res = await fetch(`${base}/${encodeURIComponent(pkg)}`, fetchOpts);
+        if (!res.ok) throw new Error(`${base} ${res.status}`);
         const data = await res.json();
-        if (config.verbose) log(`npm ${pkg}: ${Date.now() - t0}ms → ${data?.['dist-tags']?.[config.distTag] ?? 'null'}${attempt > 1 ? ' (retry)' : ''}`);
+        if (config.verbose) log(`npm ${pkg}: ${Date.now() - t0}ms → ${data?.['dist-tags']?.[config.distTag] ?? 'null'} (${new URL(base).host})`);
         return data?.['dist-tags']?.[config.distTag] ?? null;
       } catch (e) {
         const cause = e?.cause?.code || e?.cause?.message || e?.message;
-        log(`npm ${pkg} attempt ${attempt}/${attempts} FAILED after ${Date.now() - t0}ms: ${e.message} (cause: ${cause})`);
-        if (attempt >= attempts) {
-          // AbortError 等内部错误的 message 是只读 getter，直接赋值会抛 TypeError——
-          // 用包装错误携带 cause，保留原始类型信息
-          const wrapped = new Error(`npm ${pkg} failed: ${e.message} (cause: ${cause})`);
-          wrapped.cause = e;
-          throw wrapped;
-        }
-        await sleep(3000); // 退避后重试
+        log(`npm ${pkg} via ${new URL(base).host} FAILED after ${Date.now() - t0}ms: ${e.message} (cause: ${cause})`);
+        // 主源失败 → 退回下一源；全部失败 → 包装抛出
       }
     }
-    return null;
+    const wrapped = new Error(`npm ${pkg} failed: all registries failed`);
+    throw wrapped;
   }
 
   function harnessPkgPath() {
