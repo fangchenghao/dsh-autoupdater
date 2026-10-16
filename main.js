@@ -238,10 +238,26 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   // ---- npm 查询 ----
-  // 长驻进程内 undici 全局 dispatcher 的连接池/DNS 缓存会随网络抖动损坏，
-  // 表现为进程内持续 CONNECT_TIMEOUT 而新进程正常。对策：
-  // 每次查询使用全新 undici Agent（独立连接池，用完即弃），彻底隔离全局状态。
+  // 根因（本机实测）：Host 进程内 getaddrinfo 返回的 CDN IP 停留在故障窗口的坏记录
+  // （所有 registry 域名都连向同一个不可达 IP，300ms 即 ETIMEDOUT），而新进程/shell
+  // 解析正常。对策：fetch 走自定义 connect.lookup —— 用 dns.resolve4 直连 DNS 服务器
+  // 解析（绕过 getaddrinfo 的 nscd/systemd-resolved 进程级缓存），且强制 IPv4。
   import('undici').then((u) => { globalThis.__undiciAgentCtor = u.Agent; }).catch(() => {});
+  import('node:dns').then((m) => { globalThis.__dnsMod = m; }).catch(() => {});
+  function freshLookup(hostname, opts, cb) {
+    const dnsMod = globalThis.__dnsMod;
+    if (!dnsMod) { // dns 模块未就绪：退回系统 lookup
+      import('node:dns').then((m) => m.lookup(hostname, opts, cb)).catch(() => cb(new Error('dns not ready')));
+      return;
+    }
+    dnsMod.resolve4(hostname, (err, addresses) => {
+      if (err || !addresses?.length) {
+        // resolve4 失败（如 DNS 服务器只给 AAAA）：退回系统 lookup
+        return dnsMod.lookup(hostname, opts, cb);
+      }
+      cb(null, addresses[0], 4);
+    });
+  }
   // 查询源：npmmirror 为主（国内镜像，与官方数据同步，链路 0.3s），
   // registry.npmjs.org（Cloudflare 海外）在国内链路劣化时会持续 CONNECT_TIMEOUT。
   // 主源失败自动退回官方源。
@@ -254,10 +270,10 @@ export function apply(ctx, rawConfig = {}) {
           signal: AbortSignal.timeout(20000),
           headers: { accept: 'application/json' },
         };
-        // 全新 Agent = 全新连接池 + 全新 DNS 解析，不受进程历史污染
-        if (globalThis.__undiciAgentCtor) {
+        // 自定义 lookup = 每次直连 DNS 服务器解析，绕过进程级坏缓存 + 强制 IPv4
+        if (globalThis.__undiciAgentCtor && globalThis.__dnsMod) {
           fetchOpts.dispatcher = new globalThis.__undiciAgentCtor({
-            connect: { timeout: 15000 },
+            connect: { timeout: 15000, lookup: freshLookup },
             bodyTimeout: 20000,
             headersTimeout: 20000,
           });
