@@ -505,7 +505,13 @@ export function apply(ctx, rawConfig = {}) {
 
       const report = [];
       await checkAndApplyPlugins(report, { exemptQuiet: trigger === 'manual' });
-      await checkHarness(report);
+      try {
+        await checkHarness(report);
+      } catch (e) {
+        // 本体检查的网络失败不应抹掉本轮插件检查的成果（report 已有部分结果）
+        report.push(`⚠ 本体检查失败（网络）：${e?.message?.slice(0, 80)}`);
+        log('harness check failed (network):', e?.message);
+      }
 
       state.updates = report;
       state.lastError = null;
