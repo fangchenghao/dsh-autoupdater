@@ -238,9 +238,10 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   // ---- npm 查询 ----
-  // 长驻进程的 undici 连接池可能持有坏 socket（keep-alive 复用已死连接），
-  // 表现为固定几秒后 "fetch failed" 且进程内持续复现而新进程正常。
-  // 对策：重试时改用 connection: close（禁用 keep-alive 复用），并打出真实 cause。
+  // 长驻进程内 undici 全局 dispatcher 的连接池/DNS 缓存会随网络抖动损坏，
+  // 表现为进程内持续 CONNECT_TIMEOUT 而新进程正常。对策：
+  // 每次查询使用全新 undici Agent（独立连接池，用完即弃），彻底隔离全局状态。
+  import('undici').then((u) => { globalThis.__undiciAgentCtor = u.Agent; }).catch(() => {});
   async function npmLatestVersion(pkg) {
     const t0 = Date.now();
     const attempts = 2;
@@ -250,9 +251,13 @@ export function apply(ctx, rawConfig = {}) {
           signal: AbortSignal.timeout(20000),
           headers: { accept: 'application/vnd.npm.install-v1+json' },
         };
-        if (attempt > 1) {
-          // 重试：禁用 keep-alive 复用，强制新连接，绕开可能损坏的池化 socket
-          fetchOpts.headers['connection'] = 'close';
+        // 全新 Agent = 全新连接池 + 全新 DNS 解析，不受进程历史污染
+        if (globalThis.__undiciAgentCtor) {
+          fetchOpts.dispatcher = new globalThis.__undiciAgentCtor({
+            connect: { timeout: 15000 },
+            bodyTimeout: 20000,
+            headersTimeout: 20000,
+          });
         }
         const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, fetchOpts);
         if (!res.ok) throw new Error(`npm ${res.status}`);
