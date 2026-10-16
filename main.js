@@ -423,11 +423,20 @@ export function apply(ctx, rawConfig = {}) {
     // 动手前的门：手动触发只要求"此刻无运行中会话"（豁免静默等待）；
     // 定时触发走完整空闲判定（无会话 + 静默满 idleSeconds）。
     const gate = exemptQuiet ? () => !anyAgentRunning() : isIdle;
+    // 网络熔断：连续 4 个包查询失败即中止本轮（网络整体不可用时，
+    // 与其 24 个包 × 30s 干等 12 分钟，不如尽快放弃，下轮再试）
+    let consecutiveNetFails = 0;
+    const NET_FAIL_LIMIT = 4;
     for (const b of items) {
+      if (consecutiveNetFails >= NET_FAIL_LIMIT) {
+        report.push(`⚠ 连续 ${NET_FAIL_LIMIT} 个包网络超时，中止本轮（网络恢复后下轮自动重试）`);
+        break;
+      }
       const decision = decide(b.name);
       if (decision === 'skip') continue;
       try {
         const latest = await npmLatestVersion(b.name);
+        consecutiveNetFails = 0;
         if (!latest || !semverGt(latest, b.version)) continue;
         const key = `${b.name}@${latest}`;
         if (recentAttempts.has(key)) {
@@ -454,6 +463,7 @@ export function apply(ctx, rawConfig = {}) {
         if (!ok) report.push(`  ✗ ${b.name} 更新失败: ${result?.application}${reallyUpdated ? '' : `（磁盘仍为 ${diskVer}）`}`);
       } catch (e) {
         log(`plugin check ${b.name} failed:`, e?.message);
+        consecutiveNetFails++;
       }
     }
   }
