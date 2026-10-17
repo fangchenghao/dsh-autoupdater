@@ -480,9 +480,23 @@ export function apply(ctx, rawConfig = {}) {
         }
         const reallyUpdated = diskVer == null ? true : diskVer !== b.version; // 无 profileDir 时退化为信安装结果
         const ok = (result?.application === 'applied' || result?.application === 'restart-required') && reallyUpdated;
-        log(`plugin update ${b.name}:`, result?.application, `disk=${diskVer}`, reallyUpdated ? '✓' : '✗ 未变化', result?.error?.message ?? '');
+        // peerDeps 不兼容识别：插件新版要求更新的 DSH 本体，安装器主动拒绝。
+        // 归类为"等待 DSH 更新"——不是错误，等 DSH 升级后下轮自动装上；不计入失败重试。
+        // 结构化判定优先：官方 ManagementError.code === 'incompatible-version'
+        const errCode = result?.error?.code;
+        const errMsg = result?.error?.diagnostic || result?.packageResult?.output || '';
+        const peerBlocked = errCode === 'incompatible-version'
+          || /is incompatible with dsh|incompatible with this dsh runtime/i.test(errMsg);
+        log(`plugin update ${b.name}:`, result?.application, `disk=${diskVer}`, reallyUpdated ? '✓' : '✗ 未变化', errMsg ? (errMsg.split('\n')[0] || '').slice(0, 120) : '');
         await appendHistory({ kind: 'plugin', name: b.name, from: b.version, to: latest, outcome: result?.application, diskVer });
-        if (!ok) report.push(`  ✗ ${b.name} 更新失败: ${result?.application}${reallyUpdated ? '' : `（磁盘仍为 ${diskVer}）`}`);
+        if (!ok) {
+          if (peerBlocked) {
+            report.push(`  ⏸ ${b.name} ${latest} 需要更新的 DSH 本体（peerDeps 不兼容），已跳过——等 DSH 官方发布新版后自动安装`);
+            await appendHistory({ kind: 'peer-blocked', name: b.name, to: latest });
+          } else {
+            report.push(`  ✗ ${b.name} 更新失败: ${result?.application}${reallyUpdated ? '' : `（磁盘仍为 ${diskVer}）`}`);
+          }
+        }
       } catch (e) {
         log(`plugin check ${b.name} failed:`, e?.message);
         consecutiveNetFails++;
