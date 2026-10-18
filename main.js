@@ -30,6 +30,8 @@ const DEFAULTS = Object.freeze({
   verbose: true,
   harnessMode: 'notify',        // off | notify | auto（默认 notify：陌生人安装保守起步）
   graceMinutes: 30,
+  autoRollback: true,           // 升级后健康检查失败 → 自动回滚到旧版本并恢复配置
+  healthCheckSeconds: 90,       // 重启后等待服务健康的秒数
   distTag: 'latest',            // 插件查询用的 npm dist-tag
   harnessDistTag: '',           // DSH 本体查询用的 dist-tag；空 = 跟 distTag（可设 next 追预发布）
   systemdUnit: '',              // 重启用的 systemd 服务名；空 = 自动探测
@@ -67,6 +69,8 @@ function normalizeConfig(raw = {}) {
   c.idleSeconds = clampInt(c.idleSeconds, 30, 3600, DEFAULTS.idleSeconds);
   c.idleTimeoutMinutes = clampInt(c.idleTimeoutMinutes, 5, 720, DEFAULTS.idleTimeoutMinutes);
   c.graceMinutes = clampInt(c.graceMinutes, 1, 720, DEFAULTS.graceMinutes);
+  c.autoRollback = c.autoRollback !== false;
+  c.healthCheckSeconds = clampInt(c.healthCheckSeconds, 30, 600, DEFAULTS.healthCheckSeconds);
   c.whitelist = Array.isArray(c.whitelist)
     ? [...new Set(c.whitelist.filter((n) => typeof n === 'string' && n.trim()).map((n) => n.trim()))]
     : [];
@@ -306,6 +310,14 @@ export function apply(ctx, rawConfig = {}) {
     throw wrapped;
   }
 
+  /** 从当前进程 argv 里解析 --port（健康检查用） */
+  function currentPort() {
+    const argv = currentArgv() ?? [];
+    const i = argv.indexOf('--port');
+    const p = i >= 0 ? Number(argv[i + 1]) : NaN;
+    return Number.isFinite(p) ? p : 3080;
+  }
+
   function harnessPkgPath() {
     const nodeDir = process.execPath.replace(/\/bin\/node$/, '');
     return `${nodeDir}/lib/node_modules/@deepseek-ai/dsh/package.json`;
@@ -329,6 +341,10 @@ export function apply(ctx, rawConfig = {}) {
       argv: currentArgv(),
       // 重启方式：systemdUnit 有值走 systemctl restart；否则按 argv 自行拉起
       systemdUnit: config.systemdUnit || detectSystemdUnit(),
+      profileDir,
+      autoRollback: config.autoRollback,
+      healthCheckSeconds: config.healthCheckSeconds,
+      port: currentPort(),
       stagedAt: new Date().toISOString(),
     };
     await mkdir(stateDir, { recursive: true });
@@ -459,6 +475,15 @@ export function apply(ctx, rawConfig = {}) {
       if (config.verbose) log(`harness up to date (${cur})`);
       return;
     }
+    // ── 预检（B）：patch 里的 !!js ctx.<service> 引用是跨版本升级最易失效的部分
+    // （2026-10-18：0.2.1 移除了 webRuntime，用户的 connection 行引用它 → 启动失败）
+    const risks = scanPatchRisks();
+    if (risks.length) {
+      report.push(`  ⚠ 预检：配置里有 ${risks.length} 处运行时表达式引用（跨版本可能失效）：${risks.join(', ')}`);
+      await appendHistory({ kind: 'precheck-risks', risks });
+      log(`precheck risks: ${risks.join(', ')}`);
+    }
+
     report.push(`DSH 本体 ${cur} → ${latest} (staged)`);
     await stageHarnessUpdate(latest, cur);
     if (config.harnessMode === 'auto') {
@@ -470,6 +495,18 @@ export function apply(ctx, rawConfig = {}) {
     } else {
       await notify(`DSH 有新版本 ${latest}`, '已暂存更新，空闲时段重启 dsh web 生效。');
     }
+  }
+
+  /** 扫描 profile 的 cordis.patch.yml，列出 !!js ctx.<service> 这类跨版本易失效的引用 */
+  function scanPatchRisks() {
+    try {
+      const patchPath = `${profileDir || `${home}/profiles/web`}/cordis.patch.yml`;
+      if (!existsSync(patchPath)) return [];
+      const text = readFileSync(patchPath, 'utf8');
+      const found = new Set();
+      for (const m of text.matchAll(/!!js\s+[^\n]*?ctx\.([A-Za-z_$][\w$]*)/g)) found.add(m[1]);
+      return [...found];
+    } catch { return []; }
   }
 
   // ---- 插件 ----
