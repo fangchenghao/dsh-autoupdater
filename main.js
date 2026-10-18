@@ -310,6 +310,33 @@ export function apply(ctx, rawConfig = {}) {
     throw wrapped;
   }
 
+  /** 用 CLI 换插件版本：`dsh plugin --profile <p> add <pkg>@<ver>`（已装包替换装） */
+  async function runPluginCliAdd(pkg, version) {
+    try {
+      const { spawn } = await import('node:child_process');
+      const { basename, dirname, join } = await import('node:path');
+      const profileName = profileDir ? basename(profileDir) : (process.env.DSH_PROFILE || 'web');
+      // 直接用 node bin 目录下的 dsh 入口（与 execPath 同目录），比 process.argv[1] 可靠
+      const dshBin = join(dirname(process.execPath), 'dsh');
+      const r = spawn(dshBin, [
+        'plugin', '--profile', profileName, 'add', `${pkg}@${version}`,
+      ], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+      let out = '';
+      r.stdout.on('data', (d) => { out += d; });
+      r.stderr.on('data', (d) => { out += d; });
+      const code = await new Promise((res) => {
+        const t = setTimeout(() => res(-1), 300000);
+        r.on('close', (c) => { clearTimeout(t); res(c); });
+        r.on('error', () => { clearTimeout(t); res(-1); });
+      });
+      log(`CLI add ${pkg}@${version} exit=${code}${out ? ` | ${out.slice(-200).replace(/\n/g, ' ')}` : ''}`);
+      return code === 0;
+    } catch (e) {
+      log(`CLI add ${pkg} threw: ${e.message}`);
+      return false;
+    }
+  }
+
   /** 从当前进程 argv 里解析 --port（健康检查用） */
   function currentPort() {
     const argv = currentArgv() ?? [];
@@ -564,7 +591,18 @@ export function apply(ctx, rawConfig = {}) {
         recentAttempts.set(key, now);
         // 显式带 @version：installBundle(裸名) 对精确钉版的包只会"确保已装"（pnpm 跳过），
         // 不会升级——这是假更新的根因。
-        const result = await pm.installBundle(`${b.name}@${latest}`);
+        let result = await pm.installBundle(`${b.name}@${latest}`);
+        // DSH 0.2.1+ 的 pluginManager 在「实时 profile」里拒绝替换已装包
+        // （ManagementError.code = already-installed，守卫见 dsh-plugin-manager:1991）。
+        // 此时退回 CLI 路径：`dsh plugin --profile <p> add <pkg>@<ver>`——独立进程写盘，
+        // 装完标记 restart-required，正是官方推荐的换版方式。
+        if (result?.application === 'failed' && result?.error?.code === 'already-installed') {
+          log(`plugin ${b.name}: service API refused (already-installed) → fallback to CLI`);
+          const ran = await runPluginCliAdd(b.name, latest);
+          result = ran
+            ? { application: 'restart-required', via: 'cli' }
+            : { application: 'failed', error: { code: 'cli-failed' } };
+        }
         // 装完回读磁盘真实版本验证，不再信返回值
         let diskVer = null;
         if (profileDir) {
