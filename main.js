@@ -30,7 +30,8 @@ const DEFAULTS = Object.freeze({
   verbose: true,
   harnessMode: 'notify',        // off | notify | auto（默认 notify：陌生人安装保守起步）
   graceMinutes: 30,
-  distTag: 'latest',
+  distTag: 'latest',            // 插件查询用的 npm dist-tag
+  harnessDistTag: '',           // DSH 本体查询用的 dist-tag；空 = 跟 distTag（可设 next 追预发布）
   systemdUnit: '',              // 重启用的 systemd 服务名；空 = 自动探测
   pluginMode: 'regexmode-ignore', // regexmode-ignore | auto-all | notify-all | off | whitelist-auto
   whitelist: [],
@@ -70,6 +71,10 @@ function normalizeConfig(raw = {}) {
     ? [...new Set(c.whitelist.filter((n) => typeof n === 'string' && n.trim()).map((n) => n.trim()))]
     : [];
   c.verbose = c.verbose !== false;
+  // dist-tag 规范化：harnessDistTag 留空则跟随 distTag
+  if (typeof c.distTag !== 'string' || !c.distTag.trim()) c.distTag = DEFAULTS.distTag;
+  if (typeof c.harnessDistTag !== 'string') c.harnessDistTag = '';
+  c.harnessDistTag = c.harnessDistTag.trim() || c.distTag;
   return c;
 }
 
@@ -266,7 +271,8 @@ export function apply(ctx, rawConfig = {}) {
   // registry.npmjs.org（Cloudflare 海外）在国内链路劣化时会持续 CONNECT_TIMEOUT。
   // 主源失败自动退回官方源。
   const REGISTRIES = ['https://registry.npmmirror.com', 'https://registry.npmjs.org'];
-  async function npmLatestVersion(pkg) {
+  async function npmLatestVersion(pkg, tag = null) {
+    const distTag = tag ?? config.distTag;
     for (const base of REGISTRIES) {
       const t0 = Date.now();
       try {
@@ -285,8 +291,11 @@ export function apply(ctx, rawConfig = {}) {
         const res = await fetch(`${base}/${encodeURIComponent(pkg)}`, fetchOpts);
         if (!res.ok) throw new Error(`${base} ${res.status}`);
         const data = await res.json();
-        if (config.verbose) log(`npm ${pkg}: ${Date.now() - t0}ms → ${data?.['dist-tags']?.[config.distTag] ?? 'null'} (${new URL(base).host})`);
-        return data?.['dist-tags']?.[config.distTag] ?? null;
+        const v = data?.['dist-tags']?.[distTag];
+        if (config.verbose) log(`npm ${pkg}@${distTag}: ${Date.now() - t0}ms → ${v ?? 'null'} (${new URL(base).host})`);
+        // 标签不存在（如插件没有 next 标签）→ 该源视为无答案，继续试下一源
+        if (v == null) throw new Error(`dist-tag "${distTag}" absent`);
+        return v;
       } catch (e) {
         const cause = e?.cause?.code || e?.cause?.message || e?.message;
         log(`npm ${pkg} via ${new URL(base).host} FAILED after ${Date.now() - t0}ms: ${e.message} (cause: ${cause})`);
@@ -313,7 +322,7 @@ export function apply(ctx, rawConfig = {}) {
     const instruction = {
       action: 'apply-harness-update',
       pkg: '@deepseek-ai/dsh',
-      tag: config.distTag,
+      tag: config.harnessDistTag,
       from: cur,
       to: latest,
       nodeBin: process.execPath,
@@ -354,6 +363,16 @@ export function apply(ctx, rawConfig = {}) {
     return 'issued';
   }
 
+  /**
+   * 应用本体验证/重启。
+   *
+   * 关键设计（2026-10-18 事故后重构）：
+   * - dsh-web.service 的 KillMode=control-group 会在停止服务时杀掉同 cgroup 的所有进程，
+   *   所以"主进程退出后由 detach 子进程继续 npm install"在 systemd 下必然中断。
+   * - 改为：更新脚本挂到独立瞬时单元（systemd-run），脱离 dsh-web 的 cgroup；
+   *   并且 npm install -g 在服务【运行中】执行（只替换磁盘文件，不影响运行中进程），
+   *   装好并校验通过后再重启服务。任何一步失败，服务都不受影响。
+   */
   async function applyHarnessUpdateNow() {
     const pendingExists = existsSync(pendingPath);
     const unit = config.systemdUnit || detectSystemdUnit();
@@ -364,31 +383,65 @@ export function apply(ctx, rawConfig = {}) {
       await appendHistory({ kind: 'plugin-only-restart', unit });
       if (unit) {
         await restartViaSystemd(unit);
-        // 走到这里说明 sudo 失败/超时，进程还活着：记录并兜底裸退出让 systemd 判定
-        log('restart command did not take effect; falling back to detached child');
-      } else {
-        log('no systemd unit available; falling back to detached child');
+        log('restart command returned — process still alive, keeping service as-is');
+        return;
       }
-      // 兜底：交给子进程（它走安全重启路径：systemd 幂等重启或按 argv 拉起）
+      // 无 systemd：只能退出 + 由子进程按 argv 拉起（旧兜底路径）
     }
+
+    // 路径 B：本体更新 → 通过独立瞬时单元运行更新脚本（脱离 dsh-web cgroup）
     const { spawn } = await import('node:child_process');
     const { fileURLToPath } = await import('node:url');
     const { dirname, join } = await import('node:path');
     const self = join(dirname(fileURLToPath(import.meta.url)), 'apply-update.mjs');
-    const child = spawn(process.execPath, [self], {
-      detached: true,
-      stdio: 'ignore',
-      env: {
-        ...process.env,
-        AUTOUPDATE_STATE_DIR: stateDir,
-        AUTOUPDATE_SYSTEMD_UNIT: unit,           // 安全重启路径用
-        AUTOUPDATE_ARGV: currentArgv().join(' '), // 裸拉起兜底用（空格分隔；env 值不允许 null byte）
-      },
-    });
-    child.unref();
-    log('detached apply child spawned, exiting for update');
-    await appendHistory({ kind: 'harness-restart', to: harnessNotice?.version });
-    setTimeout(() => process.exit(0), 3000);
+    const envPairs = [
+      ['AUTOUPDATE_STATE_DIR', stateDir],
+      ['AUTOUPDATE_SYSTEMD_UNIT', unit],
+      ['AUTOUPDATE_ARGV', currentArgv().join(' ')],
+    ];
+
+    let launched = false;
+    if (unit) {
+      try {
+        const args = ['-n', 'systemd-run', '--unit=dsh-autoupdater-apply', '--collect',
+          '--property=Type=oneshot', '--property=StandardOutput=journal',
+          '--property=StandardError=journal'];
+        for (const [k, v] of envPairs) args.push(`--setenv=${k}=${v}`);
+        args.push(process.execPath, self);
+        const r = spawn('sudo', args, { detached: true, stdio: 'ignore' });
+        const code = await new Promise((res) => {
+          const t = setTimeout(() => res(-1), 20000);
+          r.on('close', (c) => { clearTimeout(t); res(c); });
+          r.on('error', () => { clearTimeout(t); res(-1); });
+        });
+        log(`systemd-run apply unit launched (exit=${code})`);
+        launched = code === 0;
+        if (!launched) {
+          log('systemd-run failed; falling back to detached child (may be killed by cgroup)');
+        }
+      } catch (e) {
+        log(`systemd-run threw: ${e.message}`);
+      }
+    }
+
+    if (!launched) {
+      const child = spawn(process.execPath, [self], {
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          AUTOUPDATE_STATE_DIR: stateDir,
+          AUTOUPDATE_SYSTEMD_UNIT: unit,
+          AUTOUPDATE_ARGV: currentArgv().join(' '),
+        },
+      });
+      child.unref();
+      log('detached apply child spawned (fallback path)');
+    }
+
+    await appendHistory({ kind: 'harness-apply-launched', to: harnessNotice?.version, via: launched ? 'systemd-run' : 'detached' });
+    // 不再主动退出：更新脚本会自己完成 npm install → 校验 → 重启服务。
+    // 服务活着期间用户仍可正常使用（只是稍后会被重启打断，这是升级的必要代价）。
   }
 
   async function checkHarness(report) {
@@ -400,7 +453,7 @@ export function apply(ctx, rawConfig = {}) {
     const dshPkg = await readJson(harnessPkgPath());
     const cur = dshPkg?.version;
     if (!cur) { log('cannot resolve @deepseek-ai/dsh version at', harnessPkgPath()); return; }
-    const latest = await npmLatestVersion('@deepseek-ai/dsh');
+    const latest = await npmLatestVersion('@deepseek-ai/dsh', config.harnessDistTag);
     if (!latest) return;
     if (!semverGt(latest, cur)) {
       if (config.verbose) log(`harness up to date (${cur})`);
@@ -556,11 +609,21 @@ export function apply(ctx, rawConfig = {}) {
       // 让 restart-required 的新插件与本体重启一并生效。
       const applied = report.filter((line) =>
         typeof line === 'string' && (/\(auto\)$/.test(line) || /\(staged\)$/.test(line)) && !/跳过/.test(line));
-      if (trigger === 'manual' && applied.length > 0) {
-        log(`updates applied (${applied.length}), restart DSH in 10s`);
-        await appendHistory({ kind: 'manual-restart-scheduled', updates: applied, inSeconds: 10 });
+      // 手动检查的"10 秒后重启"只适用于纯插件更新（无需 npm install）。
+      // 本体更新必须走 staged → 宽限期 → 安装并校验 → 重启，绝不能 10 秒就杀进程
+      // （2026-10-18 事故：10 秒重启抢在 npm install 之前，服务空停 61 分钟）。
+      const hadHarnessStage = applied.some((l) => /\(staged\)$/.test(l));
+      const pluginOnly = applied.filter((l) => !/\(staged\)$/.test(l));
+      if (trigger === 'manual' && pluginOnly.length > 0 && !hadHarnessStage) {
+        log(`plugin updates applied (${pluginOnly.length}), restart DSH in 10s`);
+        await appendHistory({ kind: 'manual-restart-scheduled', updates: pluginOnly, inSeconds: 10 });
         await sleep(10000);
-        await applyHarnessUpdateNow(); // 不返回：派生子进程更新+重启
+        await applyHarnessUpdateNow();
+        return;
+      }
+      if (hadHarnessStage) {
+        log('harness update staged — deferring apply to grace period (no immediate restart)');
+        await appendHistory({ kind: 'harness-stage-deferred', graceMinutes: config.graceMinutes });
         return;
       }
     } catch (e) {
@@ -573,14 +636,19 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   // ---- 宽限期 tick ----
+  let applyingHarness = false;
   async function tick() {
     try {
       if (!harnessNotice || config.harnessMode !== 'auto') return;
+      if (applyingHarness) return;
       const quietFor = nowSec() - Math.max(harnessNotice.from, lastActivity);
       if (quietFor >= config.graceMinutes * 60 && !anyAgentRunning()) {
-        await applyHarnessUpdateNow(); // 不返回
+        applyingHarness = true;
+        await applyHarnessUpdateNow(); // 更新脚本装到独立单元后自行完成安装+重启
+        harnessNotice = null;
+        applyingHarness = false;
       }
-    } catch (e) { log('tick error:', e?.message); }
+    } catch (e) { applyingHarness = false; log('tick error:', e?.message); }
   }
 
   // ---- 调度（四种模式；触发后按新配置重排）----

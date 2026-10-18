@@ -1,8 +1,13 @@
-// 独立脱离子进程：等 DSH 主进程退出后，执行 npm 全局替换并按原参数重启 dsh web。
-// 由 index.js spawn，detached 模式运行。
-// 环境变量：AUTOUPDATE_STATE_DIR = 状态目录（含 pending-update.json）
+// DSH 本体更新执行器：npm install -g（运行中执行，只改磁盘）→ 校验 → 重启服务。
+// 由 main.js 通过 `systemd-run --unit=dsh-autoupdater-apply` 启动，
+// 因此不在 dsh-web.service 的 cgroup 里 —— 重启 dsh-web 不会杀掉本进程。
+//
+// 环境变量：
+//   AUTOUPDATE_STATE_DIR    状态目录（含 pending-update.json）
+//   AUTOUPDATE_SYSTEMD_UNIT 要重启的 systemd 服务名（可空）
+//   AUTOUPDATE_ARGV         原启动 argv（空格分隔，systemd 不可用时的裸拉起兜底）
 
-import { readFileSync, existsSync, rmSync, appendFileSync, mkdirSync, readlinkSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync, appendFileSync, mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 
@@ -17,122 +22,71 @@ function alog(msg) {
   } catch {}
 }
 
-alog(`child spawned, stateDir=${stateDir}`);
+alog(`apply-update started (pid=${process.pid}, stateDir=${stateDir})`);
 
-// 无 pending 文件：不再静默退出（这是本次故障的根因路径）。
-// 可能是"仅插件更新"场景的兜底触发——执行幂等安全重启，确保服务活着。
-if (!stateDir || !existsSync(pendingPath)) {
-  alog('no pending-update.json — idempotent safety restart path');
-  const unit = process.env.AUTOUPDATE_SYSTEMD_UNIT || '';
-  let restarted = false;
-  if (unit) {
-    try {
-      const r = spawn('sudo', ['-n', 'systemctl', 'restart', unit], { stdio: 'ignore' });
-      const code = await new Promise((res) => {
-        const t = setTimeout(() => res(-1), 20000);
-        r.on('close', (c) => { clearTimeout(t); res(c); });
-        r.on('error', () => { clearTimeout(t); res(-1); });
-      });
-      alog(`safety systemctl restart ${unit} exit=${code}`);
-      restarted = code === 0;
-    } catch (e) { alog(`safety restart threw: ${e.message}`); }
-  }
-  if (!restarted) {
-    // 兜底：用环境变量传递的原 argv 重新拉起 dsh web（空格分隔；含路径含空格的安装不适用，属已知限制）
-    const argv = (process.env.AUTOUPDATE_ARGV || '').trim().split(/\s+/).filter(Boolean);
-    const dshBin = argv[1] || null;
-    if (dshBin && existsSync(dshBin)) {
-      try {
-        const child = spawn(dshBin, argv.slice(2), { detached: true, stdio: 'ignore' });
-        child.unref();
-        alog(`fallback relaunch pid=${child.pid}`);
-        restarted = true;
-      } catch (e) { alog(`fallback relaunch failed: ${e.message}`); }
-    } else {
-      alog('no systemd unit and no usable argv — cannot relaunch (service stays down until manual start)');
-    }
-  }
-  alog(`safety path done (restarted=${restarted})`);
-  process.exit(restarted ? 0 : 1);
+if (!stateDir) {
+  alog('AUTOUPDATE_STATE_DIR missing — nothing to do');
+  process.exit(1);
+}
+if (!existsSync(pendingPath)) {
+  alog('no pending-update.json — nothing to apply');
+  process.exit(0);
 }
 
 const instruction = JSON.parse(readFileSync(pendingPath, 'utf8'));
-
-// fork/spawn 后 child 的 ppid 就是 dsh web 主进程；等它退出
-const parentPid = process.ppid;
-alog(`waiting for parent ${parentPid} to exit...`);
-
-const waitForParentExit = async () => {
-  for (let i = 0; i < 300; i++) {
-    try { process.kill(parentPid, 0); } catch { return true; }
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  return false;
-};
-
-const parentGone = await waitForParentExit();
-if (!parentGone) {
-  alog('parent still alive after 300s, abort');
-  process.exit(1);
-}
-alog('parent exited, applying update');
-
-const nodeBin = instruction.nodeBin;
-const prefix = dirname(nodeBin); // .../bin
+const unit = instruction.systemdUnit || process.env.AUTOUPDATE_SYSTEMD_UNIT || '';
+const nodeBin = instruction.nodeBin || process.execPath;
+const prefix = dirname(nodeBin);
 const dshBin = join(prefix, 'dsh');
 const npmBin = join(prefix, 'npm');
 const globalRoot = `${prefix}/../lib/node_modules/@deepseek-ai/dsh`;
 
-// 1. npm 全局安装新版本
+alog(`target: ${instruction.pkg}@${instruction.tag} (from ${instruction.from}), unit=${unit || 'none'}`);
+
+// 1. npm install -g：服务仍在运行，只替换磁盘文件（运行中进程不受影响）
+let installOk = false;
 try {
-  const r = spawn(npmBin, ['install', '-g', `@deepseek-ai/dsh@${instruction.tag}`], {
+  const r = spawn(npmBin, ['install', '-g', `${instruction.pkg}@${instruction.tag}`], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
   r.stdout.on('data', (d) => { out += d; });
   r.stderr.on('data', (d) => { out += d; });
   const code = await new Promise((res) => r.on('close', res));
-  alog(`npm install exit=${code}\n${out.slice(-4000)}`);
-  if (code !== 0) {
-    alog('npm install failed, aborting (will not restart with old binary gone... checking)');
-  }
+  alog(`npm install exit=${code}\n${out.slice(-3000)}`);
+  installOk = code === 0;
 } catch (e) {
   alog(`npm install threw: ${e.message}`);
 }
 
-// 2. 验证新版本 + 启动器链接校验（借鉴 dsh-self-upgrade 的防变砖检查）：
-//    npm 更新 prefix/bin 的流程是"先建临时链接再重命名"，中途被杀会停在临时名，
-//    dsh 命令消失 → systemd 重启就再也起不来。重启前必须核一遍。
+// 2. 校验磁盘版本 + dsh 二进制存在（防变砖：缺二进制绝不重启）
 let newVer = null;
-let launcherFixed = false;
 try {
   newVer = JSON.parse(readFileSync(`${globalRoot}/package.json`, 'utf8')).version;
-  alog(`installed version: ${newVer}`);
-} catch (e) { alog(`verify read failed: ${e.message}`); }
-
-// 启动器链接：/usr/bin/dsh 或 nodeBin 同级的 dsh 必须存在且可执行
-const launcherCandidates = ['/usr/bin/dsh', '/usr/local/bin/dsh', join(prefix, 'dsh')];
-for (const cand of launcherCandidates) {
-  if (!existsSync(cand)) continue;
-  try {
-    const target = readlinkSync(cand);
-    if (target && !existsSync(cand)) { // 断链
-      alog(`BROKEN launcher link ${cand} -> ${target}`);
-    }
-  } catch {} // 非 symlink 也 OK（真实文件）
+  alog(`disk version after install: ${newVer}`);
+} catch (e) {
+  alog(`verify read failed: ${e.message}`);
 }
-// 核心校验：npm 全局 bin 目录里的 dsh 必须存在，否则不重启（避免变砖）
+
 if (!existsSync(dshBin)) {
-  alog(`FATAL: dsh binary missing at ${dshBin} after install — NOT restarting (avoid brick). 手动检查 npm 输出后重启。`);
-  appendFileSync(join(stateDir, 'history.jsonl'), JSON.stringify({
-    at: new Date().toISOString(), kind: 'harness-aborted',
-    reason: 'dsh binary missing after npm install', applied: newVer,
-  }) + '\n');
+  alog(`FATAL: dsh binary missing at ${dshBin} — NOT restarting (brick guard). Service keeps running old version.`);
+  try {
+    appendFileSync(join(stateDir, 'history.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), kind: 'harness-aborted',
+      reason: 'dsh binary missing after npm install', applied: newVer,
+    }) + '\n');
+  } catch {}
   try { rmSync(pendingPath); } catch {}
   process.exit(1);
 }
 
-// 3. 记录历史
+if (!installOk && !newVer) {
+  alog('install failed and no version readable — NOT restarting');
+  try { rmSync(pendingPath); } catch {}
+  process.exit(1);
+}
+
+// 3. 记录落盘结果
 try {
   appendFileSync(join(stateDir, 'history.jsonl'), JSON.stringify({
     at: new Date().toISOString(), kind: 'harness-applied',
@@ -140,53 +94,43 @@ try {
   }) + '\n');
 } catch {}
 
-// 4. 重启：优先 systemd（服务由 systemd 管理，裸拉起会脱离监管）。
-//    服务名来自 pending-update.json 的 systemdUnit（Host 侧从 config 或 /proc/self/cgroup 探测）。
+// 4. 重启：本进程在独立的瞬时单元里，重启 dsh-web 不会杀掉自己
 let restarted = false;
-const systemdUnit = instruction.systemdUnit || '';
-if (systemdUnit) {
+if (unit) {
   try {
-    const r = spawn('sudo', ['-n', 'systemctl', 'restart', systemdUnit], {
-      detached: true, stdio: 'ignore',
-    });
+    const r = spawn('sudo', ['-n', 'systemctl', 'restart', unit], { stdio: 'ignore' });
     const code = await new Promise((res) => {
-      const t = setTimeout(() => res(-1), 20000);
+      const t = setTimeout(() => res(-1), 60000);
       r.on('close', (c) => { clearTimeout(t); res(c); });
       r.on('error', () => { clearTimeout(t); res(-1); });
     });
-    alog(`systemctl restart ${systemdUnit} exit=${code}`);
+    alog(`systemctl restart ${unit} exit=${code}`);
     restarted = code === 0;
   } catch (e) {
     alog(`systemctl restart threw: ${e.message}`);
   }
-} else {
-  alog('no systemdUnit in instruction, skipping systemctl path');
 }
 
-// 兜底：systemd 不可用时按原 argv 裸拉起
+// 5. 无 systemd 时按原 argv 裸拉起（仅在确实拿到完整 argv 时；空的 argv 绝不擅自再拉一个实例，
+//    否则会与仍在运行的服务抢端口）
 if (!restarted) {
-  const argv = Array.isArray(instruction.argv) ? instruction.argv : null;
-  const dshBin = join(dirname(instruction.nodeBin), 'dsh');
-  if (argv && argv.length >= 2 && existsSync(dshBin)) {
+  const argv = (process.env.AUTOUPDATE_ARGV || '').trim().split(/\s+/).filter(Boolean);
+  if (argv.length >= 2 && existsSync(argv[1])) {
     try {
-      const args = argv.slice(2); // 去掉 node 和 dsh 路径
-      const child = spawn(dshBin, args, {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env },
-      });
+      const child = spawn(argv[1], argv.slice(2), { detached: true, stdio: 'ignore' });
       child.unref();
-      alog(`fallback relaunch dsh ${args.join(' ')} pid=${child.pid}`);
+      alog(`fallback relaunch pid=${child.pid}`);
       restarted = true;
     } catch (e) {
       alog(`fallback relaunch failed: ${e.message}`);
     }
   } else {
-    alog('systemd restart failed and no valid argv for fallback');
+    alog('no systemd unit and no usable argv — not relaunching (disk updated; restart dsh manually to activate)');
   }
 }
 
-// 5. 清理 pending
+// 6. 清理 pending（保留会永久阻塞后续检查，故一律删除；失败原因已写入日志与 history）
 try { rmSync(pendingPath); } catch {}
-alog(`done (restarted=${restarted})`);
-process.exit(0);
+
+alog(`done (installed=${newVer}, restarted=${restarted})`);
+process.exit(restarted ? 0 : 1);
