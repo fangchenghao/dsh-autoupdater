@@ -507,7 +507,7 @@ export function apply(ctx, rawConfig = {}) {
       if (!existsSync(patchPath)) return [];
       const text = readFileSync(patchPath, 'utf8');
       const found = new Set();
-      for (const m of text.matchAll(/!!js\s+[^\n]*?ctx\.([A-Za-z_$][\w$]*)/g)) found.add(m[1]);
+      for (const m of text.matchAll(/^[^\n#]*!!js\s+[^\n]*?ctx\.([A-Za-z_$][\w$]*)/gm)) found.add(m[1]);
       return [...found];
     } catch { return []; }
   }

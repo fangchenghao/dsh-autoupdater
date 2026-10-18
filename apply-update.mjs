@@ -104,7 +104,7 @@ function collectRequiredServices() {
     if (!existsSync(p)) return [];
     const text = readFileSync(p, 'utf8');
     const set = new Set();
-    for (const m of text.matchAll(/!!js\s+[^\n]*?ctx\.([A-Za-z_$][\w$]*)/g)) set.add(m[1]);
+    for (const m of text.matchAll(/^[^\n#]*!!js\s+[^\n]*?ctx\.([A-Za-z_$][\w$]*)/gm)) set.add(m[1]);
     return [...set];
   } catch { return []; }
 }
