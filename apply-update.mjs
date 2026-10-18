@@ -138,9 +138,10 @@ if (profileDir && newVer && autoRollback) {
   }
 }
 
-if (!installOk && !newVer) {
-  alog('install failed and no version readable — NOT restarting');
-  ahistory({ kind: 'harness-aborted', reason: 'install failed' });
+if (!installOk) {
+  // 安装失败：绝不重启（重启只会白白打断会话，版本也没变）
+  alog(`install failed (exit != 0) — NOT restarting; disk stays at ${newVer}`);
+  ahistory({ kind: 'harness-aborted', reason: 'npm install failed', applied: newVer });
   try { rmSync(pendingPath); } catch {}
   process.exit(1);
 }

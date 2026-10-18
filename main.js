@@ -419,9 +419,12 @@ export function apply(ctx, rawConfig = {}) {
     let launched = false;
     if (unit) {
       try {
+        const svcUser = process.env.USER || process.env.LOGNAME || 'ban';
         const args = ['-n', 'systemd-run', '--unit=dsh-autoupdater-apply', '--collect',
           '--property=Type=oneshot', '--property=StandardOutput=journal',
-          '--property=StandardError=journal'];
+          '--property=StandardError=journal',
+          `--uid=${svcUser}`, `--gid=${svcUser}`, // 必须与运行 dsh 的用户一致（npm -g 权限）
+        ];
         for (const [k, v] of envPairs) args.push(`--setenv=${k}=${v}`);
         args.push(process.execPath, self);
         const r = spawn('sudo', args, { detached: true, stdio: 'ignore' });
