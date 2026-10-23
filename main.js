@@ -670,7 +670,7 @@ export function apply(ctx, rawConfig = {}) {
   const recentAttempts = new Map(); // `${name}@${latest}` -> ts
   const ATTEMPT_TTL = 24 * 3600 * 1000;
 
-  async function checkAndApplyPlugins(report, { exemptQuiet = false } = {}) {
+  async function checkAndApplyPlugins(report, { exemptQuiet = false, successes = [] } = {}) {
     const pm = ctx.pluginManager;
     if (!pm?.listBundles || !pm?.installBundle) return;
     const now = Date.now();
@@ -709,7 +709,8 @@ export function apply(ctx, rawConfig = {}) {
           report.push(`${b.name} ${b.version} → ${latest} (24h 内已尝试，跳过重复安装)`);
           continue;
         }
-        report.push(`${b.name} ${b.version} → ${latest} (${decision})`);
+        const line = `${b.name} ${b.version} → ${latest} (${decision})`;
+        report.push(line);
         if (decision !== 'auto') continue;
         if (!gate()) { report.push(`  ⚠ 空闲丢失，跳过 ${b.name}`); continue; }
         // 显式带 @version：installBundle(裸名) 对精确钉版的包只会"确保已装"（pnpm 跳过），
@@ -752,7 +753,10 @@ export function apply(ctx, rawConfig = {}) {
         const ok = reallyUpdated && (reported || cliTouchedDisk);
         // 只有真正装上了才抑制 24h 重复安装；失败要允许下一轮重试（原实现失败也记 24h，
         // 一次网络抖动会让这个包一整天不再尝试）。
-        if (ok) recentAttempts.set(key, now);
+        if (ok) {
+          recentAttempts.set(key, now);
+          successes.push(line);
+        }
         // peerDeps 不兼容识别：插件新版要求更新的 DSH 本体，安装器主动拒绝。
         // 归类为"等待 DSH 更新"——不是错误，等 DSH 升级后下轮自动装上；不计入失败重试。
         // 结构化判定优先：官方 ManagementError.code === 'incompatible-version'
@@ -813,7 +817,8 @@ export function apply(ctx, rawConfig = {}) {
       }
 
       const report = [];
-      await checkAndApplyPlugins(report, { exemptQuiet: trigger === 'manual' });
+      const successes = [];
+      await checkAndApplyPlugins(report, { exemptQuiet: trigger === 'manual', successes });
       try {
         await checkHarness(report);
       } catch (e) {
@@ -823,9 +828,8 @@ export function apply(ctx, rawConfig = {}) {
       }
 
       // 桌面 App 不能从进程内部重启：把“需要重启才生效”写进本轮结果，面板里直接可见。
-      const pluginApplied = report.some((line) =>
-        typeof line === 'string' && /\(auto\)$/.test(line) && !/跳过/.test(line));
-      if (pluginApplied && isDesktopApp()) {
+      // 只统计真正成功的 upgrade（successes），失败/跳过/仅通知的版本行不算。
+      if (successes.length > 0 && isDesktopApp()) {
         report.push('  ⏻ 插件已更新到磁盘，重启 DeepSeek Harness 后生效');
       }
 
@@ -837,13 +841,13 @@ export function apply(ctx, rawConfig = {}) {
 
       // 立即检查且本轮有实际更新动作 → 延时 10 秒重启 DSH，
       // 让 restart-required 的新插件与本体重启一并生效。
-      const applied = report.filter((line) =>
-        typeof line === 'string' && (/\(auto\)$/.test(line) || /\(staged\)$/.test(line)) && !/跳过/.test(line));
+      // 只把真正装上的插件算作“已应用”；旧实现按报告里的版本行匹配，
+      // 更新失败时也会触发一次重启（并在 macOS 上撞上 currentArgv 为 null）。
+      const pluginOnly = successes;
       // 手动检查的"10 秒后重启"只适用于纯插件更新（无需 npm install）。
       // 本体更新必须走 staged → 宽限期 → 安装并校验 → 重启，绝不能 10 秒就杀进程
       // （2026-10-18 事故：10 秒重启抢在 npm install 之前，服务空停 61 分钟）。
-      const hadHarnessStage = applied.some((l) => /\(staged\)$/.test(l));
-      const pluginOnly = applied.filter((l) => !/\(staged\)$/.test(l));
+      const hadHarnessStage = report.some((line) => typeof line === 'string' && /\(staged\)$/.test(line));
       if (trigger === 'manual' && pluginOnly.length > 0 && !hadHarnessStage) {
         if (isDesktopApp()) {
           log('desktop build: plugin files updated — restart required, not restarting in-process');
