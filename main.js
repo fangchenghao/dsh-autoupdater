@@ -676,7 +676,16 @@ export function apply(ctx, rawConfig = {}) {
     const now = Date.now();
     for (const [k, ts] of recentAttempts) if (now - ts > ATTEMPT_TTL) recentAttempts.delete(k);
     const bundles = await pm.listBundles();
-    const items = (bundles ?? []).filter((b) => b?.installed && b?.removable && b.name !== 'dsh-autoupdater');
+    const items = (bundles ?? []).filter((b) => {
+      if (!b?.installed || !b?.removable || b.name === 'dsh-autoupdater') return false;
+      // link:/file:/workspace: 是本地开发目录，GitHub/tarball 是固定来源：npm 上的同名包
+      // 不是同一个东西（例如本地 @fffangchenghao/dsh-web-search 与 registry 同名包）。
+      // 用 registry 版本号去“升级”它们会把本地插件整个换掉，必须跳过。
+      const source = typeof b.source === 'string' ? b.source : '';
+      if (/(?:^|@)(?:link|file|workspace):/i.test(source)) return false;
+      if (/^(?:git\+|github:|gitlab:|bitbucket:|https?:|ssh:)/i.test(source)) return false;
+      return true;
+    });
     // 动手前的门：手动触发只要求"此刻无运行中会话"（豁免静默等待）；
     // 定时触发走完整空闲判定（无会话 + 静默满 idleSeconds）。
     const gate = exemptQuiet ? () => !anyAgentRunning() : isIdle;
