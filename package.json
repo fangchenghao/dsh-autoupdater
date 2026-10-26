@@ -1,10 +1,18 @@
 {
-  "name": "dsh-autoupdater",
+  "name": "@fffangchenghao/dsh-autoupdater",
   "version": "0.6.1",
   "type": "module",
   "license": "MIT",
-  "description": "Scheduled update checks for DSH itself and installed plugins, applied only in idle windows. Four schedule modes, dual-direction whitelist, web settings panel under the plugin manager.",
+  "description": "Maintained fork of dsh-autoupdater with macOS/Windows desktop fixes. Scheduled update checks for DSH itself and installed plugins, applied only in idle windows.",
   "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fangchenghao/dsh-autoupdater.git"
+  },
+  "homepage": "https://github.com/fangchenghao/dsh-autoupdater#readme",
+  "bugs": {
+    "url": "https://github.com/fangchenghao/dsh-autoupdater/issues"
+  },
   "keywords": [
     "deepseek",
     "harness",
@@ -46,6 +54,7 @@
     }
   },
   "publishConfig": {
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {

@@ -2,6 +2,9 @@
 
 **Auto-update plugin for DeepSeek Harness (DSH)** — 定时检查 DSH 本体与已安装插件的更新，只在无人使用的空闲窗口执行。四种调度模式、双向白名单、可视化设置面板。
 
+> **社区维护分支**：这是 [niubi6668889595/dsh-autoupdater](https://github.com/niubi6668889595/dsh-autoupdater) 的 fork，主要修复 macOS / Windows 桌面版（Electron）插件更新失败的问题。上游 PR：[#1](https://github.com/niubi6668889595/dsh-autoupdater/pull/1)。
+> npm 包名：`@fffangchenghao/dsh-autoupdater`；GitHub：`fangchenghao/dsh-autoupdater`。
+
 English below · [English](#english)
 
 ## 功能
@@ -18,14 +21,16 @@ English below · [English](#english)
 ## 安装
 
 ```sh
-dsh plugin --profile web add dsh-autoupdater
+dsh plugin --profile web add @fffangchenghao/dsh-autoupdater
 ```
 
 或从 GitHub：
 
 ```sh
-dsh plugin --profile web add github:<owner>/dsh-autoupdater
+dsh plugin --profile web add github:fangchenghao/dsh-autoupdater
 ```
+
+> 用 scoped 包名是为了不和上游 `dsh-autoupdater` 抢注同名包；bundle id 仍是 `dsh-autoupdater`，配置与状态路径不变。
 
 安装后重启 DSH（systemd 环境：`sudo systemctl restart <你的dsh服务名>`），然后在 **插件管理器 → 自动更新** 卡片配置。
 
@@ -82,6 +87,13 @@ dsh plugin --profile web add github:<owner>/dsh-autoupdater
 
 因此桌面版的工作方式是：**静默把插件换版到磁盘 → 面板提示重启 → 你下次打开 App 时生效**。
 
+## 维护说明
+
+- 上游项目：[niubi6668889595/dsh-autoupdater](https://github.com/niubi6668889595/dsh-autoupdater)（MIT）。
+- 本分支新增：桌面版 CLI 换版、npmmirror 优先、跳过 `link:`/git 来源、只有真正升级成功才算“已应用”；完整差异见 git log。
+- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.1`。
+- 与上游同步：把上游加为 remote，rebase/merge 到本分支后重新发版即可。
+
 ## 安全模型
 
 - 默认 `harnessMode: notify`——只暂存并通知，重启动作需你显式改为 auto
@@ -119,6 +131,6 @@ MIT
 - **Activity log**: every check, update, and restart recorded and viewable in the panel
 - **Brick protection**: verifies the dsh binary exists after npm install before restarting
 
-Install: `dsh plugin --profile web add dsh-autoupdater`, then restart DSH and configure under **Plugin Manager → dsh-autoupdater**.
+Install: `dsh plugin --profile web add @fffangchenghao/dsh-autoupdater` (or `github:fangchenghao/dsh-autoupdater`), then restart DSH and configure under **Plugin Manager → dsh-autoupdater**.
 
 See the Chinese sections above for full details — the configuration table and idle-detection notes apply to both languages.

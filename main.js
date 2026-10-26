@@ -3,6 +3,15 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import { basename, delimiter, dirname, join } from 'node:path';
 
+/** 本插件的真实包名（上游名或发布用的 scoped 名），用于把自己排除在自动更新之外。 */
+const SELF_NAME = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).name;
+  } catch {
+    return 'dsh-autoupdater';
+  }
+})();
+
 /**
  * dsh-autoupdater — 定时检查 DSH 本体与已装 bundle 插件的更新。
  * 零第三方依赖。
@@ -677,7 +686,8 @@ export function apply(ctx, rawConfig = {}) {
     for (const [k, ts] of recentAttempts) if (now - ts > ATTEMPT_TTL) recentAttempts.delete(k);
     const bundles = await pm.listBundles();
     const items = (bundles ?? []).filter((b) => {
-      if (!b?.installed || !b?.removable || b.name === 'dsh-autoupdater') return false;
+      if (!b?.installed || !b?.removable) return false;
+      if (b.name === SELF_NAME || b.name === 'dsh-autoupdater') return false;
       // link:/file:/workspace: 是本地开发目录，GitHub/tarball 是固定来源：npm 上的同名包
       // 不是同一个东西（例如本地 @fffangchenghao/dsh-web-search 与 registry 同名包）。
       // 用 registry 版本号去“升级”它们会把本地插件整个换掉，必须跳过。

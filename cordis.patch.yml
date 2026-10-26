@@ -1,6 +1,6 @@
 - insert:
     - id: dsh-autoupdater
-      name: dsh-autoupdater
+      name: '@fffangchenghao/dsh-autoupdater'
       config:
         # ── 调度 ──
         # scheduleMode: daily | everyHours | everyDays | everyMinutes
