@@ -31,6 +31,8 @@ dsh plugin --profile web add github:fangchenghao/dsh-autoupdater
 ```
 
 > 用 scoped 包名是为了不和上游 `dsh-autoupdater` 抢注同名包；bundle id 仍是 `dsh-autoupdater`，配置与状态路径不变。
+>
+> Windows 桌面版更推荐直接在 **插件管理器 → 安装插件** 里填包名安装；装完重启 App。
 
 安装后重启 DSH（systemd 环境：`sudo systemctl restart <你的dsh服务名>`），然后在 **插件管理器 → 自动更新** 卡片配置。
 
@@ -87,11 +89,22 @@ dsh plugin --profile web add github:fangchenghao/dsh-autoupdater
 
 因此桌面版的工作方式是：**静默把插件换版到磁盘 → 面板提示重启 → 你下次打开 App 时生效**。
 
+### Windows 支持（0.6.2+）
+
+0.6.2 起 Windows 桌面版与 macOS 使用同一条换版路径，并修掉了 0.6.1 里的几处 Unix-only 假设：
+
+- **空闲判定**不再调用 `find -newermt`（Windows 的 `find.exe` 是文本搜索，不支持这些参数，会让插件永远认为“忙”），改为纯 Node 递归扫描 `%DSH_HOME%\sessions`。目录不存在 = 没有会话 = 空闲；只有根目录不可读才保守当忙。
+- **`dsh.cmd` 调用**：PATH / sibling 找到的 `.cmd` 经 `cmd.exe` 执行并正确加引号；超时用 `taskkill /T /F` 结束整棵进程树，避免留下 pnpm 子进程。
+- **环境变量**：没有 `HOME` 时用 `homedir()`（Windows 的 `USERPROFILE`）；PATH 兼容 `Path` 键，并额外查找 `%APPDATA%\npm` / `%LOCALAPPDATA%\pnpm`。
+- Windows 上不执行 DSH 本体更新（交给安装器/App 自带更新器），插件换版后同样只提示重启。
+
+开发机是 macOS；Windows 分支是按 Node/Electron 的跨平台语义改的，并做了逻辑测试，但**尚未在真实 Windows 机器上端到端跑过**。如果 Windows 上仍失败，请把面板日志和 `%USERPROFILE%\.dsh\autoupdater\history.jsonl` 发到 GitHub issue。
+
 ## 维护说明
 
 - 上游项目：[niubi6668889595/dsh-autoupdater](https://github.com/niubi6668889595/dsh-autoupdater)（MIT）。
-- 本分支新增：桌面版 CLI 换版、npmmirror 优先、跳过 `link:`/git 来源、只有真正升级成功才算“已应用”；完整差异见 git log。
-- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.1`。
+- 本分支新增：桌面版 CLI 换版、npmmirror 优先、跳过 `link:`/git 来源、只有真正升级成功才算“已应用”、Windows 空闲判定/.cmd 调用适配；完整差异见 git log。
+- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.2`。
 - 与上游同步：把上游加为 remote，rebase/merge 到本分支后重新发版即可。
 
 ## 安全模型
@@ -106,6 +119,7 @@ dsh plugin --profile web add github:fangchenghao/dsh-autoupdater
 - 插件更新只覆盖声明 `dsh.bundle` 的 npm 形态插件；GitHub 源码安装的插件版本比对不适用
 - 本体更新依赖 npm 全局安装形态（git checkout 形态请用 [dsh-updater](https://github.com/GodCC6/dsh-updater)；桌面 App 不参与本体更新，由 App 自带更新器负责）
 - 空闲判定基于本机 `$DSH_HOME/sessions` 的文件 mtime，远程会话（SSH 场景）不计入
+- Windows 原生环境尚未实机验证（0.6.2 已移除 Unix-only 依赖，仍建议先看面板日志确认 desktop CLI 路径）
 
 ## 致谢
 
@@ -132,5 +146,7 @@ MIT
 - **Brick protection**: verifies the dsh binary exists after npm install before restarting
 
 Install: `dsh plugin --profile web add @fffangchenghao/dsh-autoupdater` (or `github:fangchenghao/dsh-autoupdater`), then restart DSH and configure under **Plugin Manager → dsh-autoupdater**.
+
+**Windows (0.6.2+)**: the desktop path is shared with macOS. 0.6.2 removes the Unix `find` idle check, invokes `dsh.cmd` through `cmd.exe`, falls back to `homedir()` when `HOME` is absent, and leaves DSH core updates to the installer/app. Windows has not been tested end-to-end on a real machine yet; logs are welcome in GitHub issues.
 
 See the Chinese sections above for full details — the configuration table and idle-detection notes apply to both languages.

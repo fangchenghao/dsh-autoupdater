@@ -1,7 +1,8 @@
 import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
-import { execSync, spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { basename, delimiter, dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
 /** 本插件的真实包名（上游名或发布用的 scoped 名），用于把自己排除在自动更新之外。 */
 const SELF_NAME = (() => {
@@ -139,6 +140,48 @@ async function readJson(path) {
   try { return JSON.parse(await readFile(path, 'utf8')); } catch { return null; }
 }
 
+/**
+ * 递归找出目录里最新的文件 mtime（毫秒）。
+ * 目录不存在 → 0（没有会话 = 空闲）；根目录读不了 → 抛错（调用方保守当忙）。
+ * 用纯 Node 实现，避免 Windows 上没有 Unix `find` 导致空闲判定永远为忙。
+ */
+function newestFileMtimeMs(dir) {
+  if (!existsSync(dir)) return 0;
+  let newest = 0;
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch (e) {
+      if (current === dir) throw e;
+      continue; // 子目录权限不足不应让整个探测失败
+    }
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) { stack.push(full); continue; }
+      if (!entry.isFile()) continue;
+      try {
+        const m = statSync(full).mtimeMs;
+        if (m > newest) newest = m;
+      } catch {}
+    }
+  }
+  return newest;
+}
+
+/**
+ * Windows 的 npm 全局命令是 dsh.cmd，不能直接 spawn（必须经 cmd.exe）。
+ * 返回已加引号的命令行；其他平台或 .exe 返回 null。
+ * 平台参数只用于测试，生产调用走默认值。
+ */
+function windowsShellCommand(command, args, platform = process.platform) {
+  if (platform !== 'win32' || !/\.(cmd|bat)$/i.test(command)) return null;
+  const quote = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  return [quote(command), ...args.map(quote)].join(' ');
+}
+
 /** 运行子进程并收集 stdout+stderr；超时或无法启动 → code -1。 */
 function spawnCapture(command, args, { env = process.env, timeoutMs = 300000 } = {}) {
   return new Promise((resolve) => {
@@ -150,15 +193,30 @@ function spawnCapture(command, args, { env = process.env, timeoutMs = 300000 } =
       settled = true;
       resolve({ code, output });
     };
+    const shellCommand = windowsShellCommand(command, args);
     try {
-      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env });
+      child = shellCommand
+        ? spawn(shellCommand, [], { stdio: ['ignore', 'pipe', 'pipe'], env, shell: true, windowsHide: true })
+        : spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env, windowsHide: true });
     } catch (e) {
       output += String(e?.message ?? e);
       finish(-1);
       return;
     }
+    const killTree = () => {
+      if (!child?.pid) return;
+      if (process.platform === 'win32') {
+        try {
+          execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+            stdio: 'ignore', windowsHide: true,
+          });
+        } catch {}
+      } else {
+        try { child.kill('SIGKILL'); } catch {}
+      }
+    };
     const timer = setTimeout(() => {
-      try { child.kill(); } catch {}
+      killTree();
       output += `\n[dsh-autoupdater] timeout after ${timeoutMs}ms`;
       finish(-1);
     }, timeoutMs);
@@ -185,12 +243,13 @@ function lastMeaningfulLine(text, limit = 220) {
 export const inject = ['agents', 'pluginManager', 'webServer'];
 
 export function apply(ctx, rawConfig = {}) {
-  const home = process.env.DSH_HOME || `${process.env.HOME}/.dsh`;
-  const stateDir = `${home}/autoupdater`;
-  const statePath = `${stateDir}/status.json`;
-  const historyPath = `${stateDir}/history.jsonl`;
-  const pendingPath = `${stateDir}/pending-update.json`;
-  const hotConfigPath = `${stateDir}/config.json`;
+  // Windows 上通常没有 HOME，只有 USERPROFILE；homedir() 会选对。
+  const home = process.env.DSH_HOME || join(homedir(), '.dsh');
+  const stateDir = join(home, 'autoupdater');
+  const statePath = join(stateDir, 'status.json');
+  const historyPath = join(stateDir, 'history.jsonl');
+  const pendingPath = join(stateDir, 'pending-update.json');
+  const hotConfigPath = join(stateDir, 'config.json');
 
   let state = { lastRun: null, lastNotice: null, updates: [], lastError: null };
   readJson(statePath).then((s) => { if (s) state = { ...state, ...s }; }).catch(() => {});
@@ -208,15 +267,15 @@ export function apply(ctx, rawConfig = {}) {
   // 多个时取 node_modules 最近修改的。找不到 = 磁盘回读退化为仅信安装结果。
   let profileDir = process.env.DSH_PROFILE_DIR || null;
   try {
-    const base = `${home}/profiles`;
+    const base = join(home, 'profiles');
     const candidates = readdirSync(base)
-      .map((name) => `${base}/${name}`)
-      .filter((dir) => existsSync(`${dir}/node_modules`));
+      .map((name) => join(base, name))
+      .filter((dir) => existsSync(join(dir, 'node_modules')));
     if (candidates.length === 1) {
       profileDir = candidates[0];
     } else if (candidates.length > 1) {
       profileDir = candidates
-        .map((dir) => ({ dir, m: statSync(`${dir}/node_modules`).mtimeMs }))
+        .map((dir) => ({ dir, m: statSync(join(dir, 'node_modules')).mtimeMs }))
         .sort((a, b) => b.m - a.m)[0].dir;
     }
     if (profileDir && config.verbose) log('profileDir detected:', profileDir);
@@ -237,9 +296,15 @@ export function apply(ctx, rawConfig = {}) {
    */
   function resolvePluginCli() {
     if (isDesktopApp() && process.resourcesPath) {
-      const desktopCli = join(process.resourcesPath, 'app.asar', 'dsh', 'node_modules',
-        '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js');
-      if (existsSync(desktopCli)) {
+      const desktopCliCandidates = [
+        join(process.resourcesPath, 'app.asar', 'dsh', 'node_modules',
+          '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js'),
+        // 未打包/开发模式：resources/app/dsh/...
+        join(process.resourcesPath, 'app', 'dsh', 'node_modules',
+          '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js'),
+      ];
+      const desktopCli = desktopCliCandidates.find((candidate) => existsSync(candidate));
+      if (desktopCli) {
         return {
           command: process.execPath,
           prefixArgs: [desktopCli],
@@ -247,15 +312,21 @@ export function apply(ctx, rawConfig = {}) {
           label: 'desktop-cli',
         };
       }
-      log('desktop CLI not found at', desktopCli);
+      log('desktop CLI not found at', desktopCliCandidates[0]);
     }
     // 普通 npm 全局安装：dsh 与 node 同目录（Linux 常见布局）
-    const sibling = join(dirname(process.execPath), process.platform === 'win32' ? 'dsh.cmd' : 'dsh');
+    const binName = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
+    const sibling = join(dirname(process.execPath), binName);
     if (existsSync(sibling)) return { command: sibling, prefixArgs: [], env: {}, label: 'sibling-cli' };
     // 最后退回 PATH（macOS 上 npm 全局安装常见于 ~/.local/bin，而非 node 同目录）
-    const binName = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
-    for (const dir of String(process.env.PATH ?? '').split(delimiter)) {
-      if (!dir) continue;
+    // Windows 环境变量大小写不敏感，但键名通常是 Path 而不是 PATH。
+    const pathEnv = process.env.Path ?? process.env.PATH ?? '';
+    const pathDirs = String(pathEnv).split(delimiter).filter(Boolean);
+    if (process.platform === 'win32') {
+      if (process.env.APPDATA) pathDirs.push(join(process.env.APPDATA, 'npm'));
+      if (process.env.LOCALAPPDATA) pathDirs.push(join(process.env.LOCALAPPDATA, 'pnpm'));
+    }
+    for (const dir of pathDirs) {
       const candidate = join(dir, binName);
       if (existsSync(candidate)) return { command: candidate, prefixArgs: [], env: {}, label: 'path-cli' };
     }
@@ -277,20 +348,18 @@ export function apply(ctx, rawConfig = {}) {
   // 借鉴 dsh-self-upgrade 的判定（实测比 agent.status 可靠）：
   // 会话日志 2 分钟内无任何写入 = 无进行中的工作。agent.status 存在 turn 结束
   // 后仍停留 'running' 的情况（本机实测），会永久阻塞空闲判定，故弃用。
-  const sessionsDir = `${home}/sessions`;
+  const sessionsDir = join(home, 'sessions');
   let sessionsBusyCache = { at: 0, busy: true };
   const anyAgentRunning = () => {
     const now = Date.now();
     if (now - sessionsBusyCache.at < 8000) return sessionsBusyCache.busy; // 8s 缓存
     try {
-      // mtime 探测：-newermt 用固定秒窗避免 -mmin 的分钟取整误差
-      const cutoff = new Date(Date.now() - 120_000).toISOString();
-      const out = execSync(
-        `find ${JSON.stringify(sessionsDir)} -type f -newermt ${JSON.stringify(cutoff)} 2>/dev/null | head -1`,
-        { timeout: 8000 },
-      ).toString().trim();
-      sessionsBusyCache = { at: now, busy: out !== '' };
-    } catch { sessionsBusyCache = { at: now, busy: true }; } // 探测失败保守当忙
+      // 2 分钟内有文件写入 = 有进行中的工作；目录不存在 = 没有会话 = 空闲。
+      const newest = newestFileMtimeMs(sessionsDir);
+      sessionsBusyCache = { at: now, busy: newest > now - 120_000 };
+    } catch {
+      sessionsBusyCache = { at: now, busy: true }; // 根目录探测失败保守当忙
+    }
     return sessionsBusyCache.busy;
   };
 
@@ -411,7 +480,9 @@ export function apply(ctx, rawConfig = {}) {
       log('CLI add:', reason);
       return { ok: false, code: -1, output: '', reason };
     }
-    const profileName = profileDir ? basename(profileDir) : (process.env.DSH_PROFILE || 'web');
+    const profileName = profileDir
+      ? basename(profileDir)
+      : (process.env.DSH_PROFILE || (isDesktopApp() ? 'desktop' : 'web'));
     // pnpm 自身不会在 registry 之间回退。国内链路 registry.npmjs.org 实测会连续
     // CONNECT_TIMEOUT（一次 130 个包安装用了 3 分 14 秒），而版本查询用的 npmmirror
     // 同一版本有同步副本、1~3 秒装完。先问 npmmirror，失败再退回 pnpm 默认源。
@@ -487,6 +558,7 @@ export function apply(ctx, rawConfig = {}) {
 
   /** 自动探测管理本进程的 systemd 服务名（无则返回空 = 裸进程模式） */
   function detectSystemdUnit() {
+    if (process.platform !== 'linux') return '';
     try {
       const cgroup = readFileSync('/proc/self/cgroup', 'utf8');
       const m = cgroup.match(/\/system\.slice\/([a-z0-9@._-]+\.service)/i);
@@ -524,7 +596,6 @@ export function apply(ctx, rawConfig = {}) {
    */
   async function applyHarnessUpdateNow() {
     const pendingExists = existsSync(pendingPath);
-    const unit = config.systemdUnit || detectSystemdUnit();
 
     // 桌面 App：DSH 本体由 electron-updater 负责，npm -g 不能也不该覆盖 .app 内的运行时；
     // 插件更新也不能从进程内安全 relaunch（会连带杀掉正在跑的会话）。统一标记“待重启”。
@@ -533,6 +604,15 @@ export function apply(ctx, rawConfig = {}) {
       await appendHistory({ kind: 'restart-required', reason: 'desktop-app', pending: pendingExists });
       return;
     }
+
+    // Windows 非桌面模式：没有 systemd，也不支持 apply-update.mjs 的 POSIX 重启方式。
+    if (process.platform === 'win32') {
+      log('Windows: in-process restart/apply unsupported — restart required');
+      await appendHistory({ kind: 'restart-required', reason: 'win32', pending: pendingExists });
+      return;
+    }
+
+    const unit = config.systemdUnit || detectSystemdUnit();
 
     // 路径 A：仅插件更新（无 pending 文件）→ 无需 npm install，直接重启激活新插件
     if (!pendingExists) {
@@ -616,6 +696,11 @@ export function apply(ctx, rawConfig = {}) {
       if (config.verbose) log('desktop build: DSH core updates are owned by the app updater — skip harness check');
       return;
     }
+    if (process.platform === 'win32') {
+      // Windows 的 npm 全局布局与 POSIX 不同，且没有 systemd 重启路径；本体交给安装器/App 更新。
+      if (config.verbose) log('Windows: DSH core updates are handled by the installer/app updater — skip harness check');
+      return;
+    }
     if (existsSync(pendingPath)) {
       if (config.verbose) log('pending update already staged, skip harness check');
       return;
@@ -654,7 +739,7 @@ export function apply(ctx, rawConfig = {}) {
   /** 扫描 profile 的 cordis.patch.yml，列出 !!js ctx.<service> 这类跨版本易失效的引用 */
   function scanPatchRisks() {
     try {
-      const patchPath = `${profileDir || `${home}/profiles/web`}/cordis.patch.yml`;
+      const patchPath = join(profileDir || join(home, 'profiles', 'web'), 'cordis.patch.yml');
       if (!existsSync(patchPath)) return [];
       const text = readFileSync(patchPath, 'utf8');
       const found = new Set();
@@ -752,7 +837,7 @@ export function apply(ctx, rawConfig = {}) {
         // 装完回读磁盘真实版本验证，不再信返回值
         let diskVer = null;
         if (profileDir) {
-          const diskPkg = await readJson(`${profileDir}/node_modules/${b.name}/package.json`).catch(() => null);
+          const diskPkg = await readJson(join(profileDir, 'node_modules', b.name, 'package.json')).catch(() => null);
           diskVer = diskPkg?.version ?? null;
         }
         const reallyUpdated = diskVer == null ? true : diskVer !== b.version; // 无 profileDir 时退化为信安装结果
