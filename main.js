@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
-import { basename, delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 /** 本插件的真实包名（上游名或发布用的 scoped 名），用于把自己排除在自动更新之外。 */
@@ -141,6 +141,20 @@ async function readJson(path) {
 }
 
 /**
+ * 与 @deepseek-ai/dsh-home-paths 的 resolveDshHome 对齐：
+ * $DSH_HOME 优先（支持 ~ / ~\ 前缀，空/全空白视为未设置），否则 ~/.dsh。
+ * 这样 Windows 上没有 HOME、只设置 DSH_HOME 或 USERPROFILE 时都能落到同一目录。
+ */
+function resolveDshHome(env = process.env) {
+  const raw = typeof env.DSH_HOME === 'string' ? env.DSH_HOME : '';
+  if (raw.trim().length === 0) return join(homedir(), '.dsh');
+  let expanded = raw;
+  if (raw === '~') expanded = homedir();
+  else if (raw.startsWith('~/') || raw.startsWith('~\\')) expanded = join(homedir(), raw.slice(2));
+  return resolve(expanded);
+}
+
+/**
  * 递归找出目录里最新的文件 mtime（毫秒）。
  * 目录不存在 → 0（没有会话 = 空闲）；根目录读不了 → 抛错（调用方保守当忙）。
  * 用纯 Node 实现，避免 Windows 上没有 Unix `find` 导致空闲判定永远为忙。
@@ -244,7 +258,7 @@ export const inject = ['agents', 'pluginManager', 'webServer'];
 
 export function apply(ctx, rawConfig = {}) {
   // Windows 上通常没有 HOME，只有 USERPROFILE；homedir() 会选对。
-  const home = process.env.DSH_HOME || join(homedir(), '.dsh');
+  const home = resolveDshHome();
   const stateDir = join(home, 'autoupdater');
   const statePath = join(stateDir, 'status.json');
   const historyPath = join(stateDir, 'history.jsonl');
@@ -262,27 +276,37 @@ export function apply(ctx, rawConfig = {}) {
     if (hot) config = normalizeConfig({ ...rawConfig, ...hot });
   }
 
+  /** 是否运行在 Electron 桌面 App 的进程里（macOS/Windows 安装包）。 */
+  const isDesktopApp = () => typeof process.versions?.electron === 'string';
+
   // ── profile 目录探测（磁盘版本回读用）──
-  // DSH_PROFILE_DIR 优先；否则在 $DSH_HOME/profiles 下找含 node_modules 的目录，
-  // 多个时取 node_modules 最近修改的。找不到 = 磁盘回读退化为仅信安装结果。
+  // 优先级与 DSH 自身一致：DSH_PROFILE_DIR → DSH_PROFILE → 扫描 profiles。
+  // 桌面版在 DSH_PROFILE 缺失时默认 desktop，避免多 profile 时误选最近修改的测试 profile。
   let profileDir = process.env.DSH_PROFILE_DIR || null;
+  if (profileDir && !existsSync(profileDir)) profileDir = null;
+  if (!profileDir) {
+    const configuredProfile = process.env.DSH_PROFILE || (isDesktopApp() ? 'desktop' : '');
+    if (configuredProfile) {
+      const candidate = join(home, 'profiles', configuredProfile);
+      if (existsSync(candidate)) profileDir = candidate;
+    }
+  }
   try {
-    const base = join(home, 'profiles');
-    const candidates = readdirSync(base)
-      .map((name) => join(base, name))
-      .filter((dir) => existsSync(join(dir, 'node_modules')));
-    if (candidates.length === 1) {
-      profileDir = candidates[0];
-    } else if (candidates.length > 1) {
-      profileDir = candidates
-        .map((dir) => ({ dir, m: statSync(join(dir, 'node_modules')).mtimeMs }))
-        .sort((a, b) => b.m - a.m)[0].dir;
+    if (!profileDir) {
+      const base = join(home, 'profiles');
+      const candidates = readdirSync(base)
+        .map((name) => join(base, name))
+        .filter((dir) => existsSync(join(dir, 'node_modules')));
+      if (candidates.length === 1) {
+        profileDir = candidates[0];
+      } else if (candidates.length > 1) {
+        profileDir = candidates
+          .map((dir) => ({ dir, m: statSync(join(dir, 'node_modules')).mtimeMs }))
+          .sort((a, b) => b.m - a.m)[0].dir;
+      }
     }
     if (profileDir && config.verbose) log('profileDir detected:', profileDir);
   } catch {}
-
-  /** 是否运行在 Electron 桌面 App 的进程里（macOS/Windows 安装包）。 */
-  const isDesktopApp = () => typeof process.versions?.electron === 'string';
 
   /**
    * 找一条能真正写 profile 的 `dsh plugin` 入口。
@@ -476,7 +500,7 @@ export function apply(ctx, rawConfig = {}) {
   async function runPluginCliAdd(pkg, version) {
     const cli = resolvePluginCli();
     if (!cli) {
-      const reason = '找不到可用的 dsh CLI（桌面 App 自带的 dsh-desktop-host 与 PATH 上的 dsh 都不可用）';
+      const reason = `找不到可用的 dsh CLI（platform=${process.platform}, resourcesPath=${process.resourcesPath ?? 'n/a'}, execPath=${process.execPath}）`;
       log('CLI add:', reason);
       return { ok: false, code: -1, output: '', reason };
     }

@@ -97,6 +97,7 @@ dsh plugin --profile web add github:fangchenghao/dsh-autoupdater
 - **`dsh.cmd` 调用**：PATH / sibling 找到的 `.cmd` 经 `cmd.exe` 执行并正确加引号；超时用 `taskkill /T /F` 结束整棵进程树，避免留下 pnpm 子进程。
 - **环境变量**：没有 `HOME` 时用 `homedir()`（Windows 的 `USERPROFILE`）；PATH 兼容 `Path` 键，并额外查找 `%APPDATA%\npm` / `%LOCALAPPDATA%\pnpm`。
 - Windows 上不执行 DSH 本体更新（交给安装器/App 自带更新器），插件换版后同样只提示重启。
+- **多 profile 选择**：优先使用桌面 App 注入的 `DSH_PROFILE_DIR` / `DSH_PROFILE`；桌面版在两者都缺失时默认 `desktop`，不会因为某个测试 profile 的 `node_modules` 更新时间更近而误选。
 
 开发机是 macOS；Windows 分支是按 Node/Electron 的跨平台语义改的，并做了逻辑测试，但**尚未在真实 Windows 机器上端到端跑过**。如果 Windows 上仍失败，请把面板日志和 `%USERPROFILE%\.dsh\autoupdater\history.jsonl` 发到 GitHub issue。
 
@@ -104,7 +105,7 @@ dsh plugin --profile web add github:fangchenghao/dsh-autoupdater
 
 - 上游项目：[niubi6668889595/dsh-autoupdater](https://github.com/niubi6668889595/dsh-autoupdater)（MIT）。
 - 本分支新增：桌面版 CLI 换版、npmmirror 优先、跳过 `link:`/git 来源、只有真正升级成功才算“已应用”、Windows 空闲判定/.cmd 调用适配；完整差异见 git log。
-- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.2`。
+- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.3`。
 - 与上游同步：把上游加为 remote，rebase/merge 到本分支后重新发版即可。
 
 ## 安全模型
