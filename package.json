@@ -28,6 +28,9 @@
     "./locale/*.json": "./locale/*.json"
   },
   "main": "./main.js",
+  "scripts": {
+    "test": "node test/loader-contract.mjs"
+  },
   "files": [
     "main.js",
     "client.js",
