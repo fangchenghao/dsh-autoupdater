@@ -1,7 +1,51 @@
+/**
+ * Web UI half of `@fffangchenghao/dsh-autoupdater`.
+ *
+ * Registers one card into the Plugins page's `plugins.item` slot, plus the
+ * settings form behind it.
+ *
+ * ## The module id must be the package name
+ *
+ * `@deepseek-ai/dsh-client-modules` composes the `__DSH_BOOT__` entry graph from
+ * package names: each `dsh.client` package becomes exactly one graph row whose
+ * id is that package's name (`stripClientSuffix` only trims a trailing
+ * `/client`). The loader then imports that row and looks up a factory
+ * registered under *that* id.
+ *
+ * This file used to register the short id `dsh-autoupdater`, which was correct
+ * while the package was still named `dsh-autoupdater`. The fork republished as
+ * `@fffangchenghao/dsh-autoupdater` and the id was left behind, so the import of
+ * `@fffangchenghao/dsh-autoupdater` found no factory ("import failed"), and the
+ * boot activation audit turned that into a fatal dialog — because this package
+ * declares `dsh.client.immediately: true`, a client entry that fails to
+ * activate aborts the whole Web boot. Keep this id equal to `name` in
+ * package.json; nothing else about it is free.
+ *
+ * ## Nothing here may throw at factory time
+ *
+ * A throw while materializing the factory fails the entry the same way. The
+ * `react` require and the slot registration are therefore guarded, so a missing
+ * peer or an unexpected slot contract degrades this plugin to an inert module
+ * instead of taking the desktop app down with it.
+ *
+ * @module @fffangchenghao/dsh-autoupdater/client
+ */
+
 window.__ModuleLoader__.load({
-  id: 'dsh-autoupdater',
+  // MUST equal `name` in package.json — see the module docblock above.
+  id: '@fffangchenghao/dsh-autoupdater',
   factory(require) {
-    const React = require('react');
+    let React;
+    try {
+      React = require('react');
+    } catch (error) {
+      try {
+        console.warn('[dsh-autoupdater] client: react unavailable, panel disabled', error);
+      } catch (ignored) {
+        /* nothing to do */
+      }
+      return { inject: ['slots'], apply() {} };
+    }
     const h = React.createElement;
 
     const SCHEDULE_OPTIONS = [
@@ -563,35 +607,65 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * Register the Plugins-page card. Split out of `apply` only so `apply` can
+     * guard it with one try/catch.
+     *
+     * The card id stays the short `dsh-autoupdater` on purpose: it is a slot
+     * cell key in `plugins.item`, which only has to be unique among that slot's
+     * occupants and is not the module id. `locale` is deliberately absent — the
+     * slot's registration contract is `{ id, order, label }` and nothing else.
+     */
+    function mount(ctx) {
+      // 注入一次性的骨架屏动画样式
+      if (typeof document !== 'undefined' && !document.getElementById('dsh-autoupdater-style')) {
+        const el = document.createElement('style');
+        el.id = 'dsh-autoupdater-style';
+        el.textContent = '@keyframes dsw-autoupdater-pulse{0%,100%{opacity:.5}50%{opacity:.15}}';
+        document.head.appendChild(el);
+      }
+
+      // 卡片摘要（插件管理器列表里的一行说明）
+      function Summary() {
+        return h('span', { style: { color: T.text2, fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 5 } },
+          h('span', { 'aria-hidden': true }, '⟳'),
+          '自动更新 · 空闲窗口执行 · 点击进入设置');
+      }
+      // 详情页（点开卡片后的完整设置面板）
+      function Page(props) {
+        if (props.view === 'summary') return h(Summary);
+        return h(App);
+      }
+
+      if (ctx === null || typeof ctx !== 'object') return;
+      const slots = ctx.slots;
+      if (slots === null || typeof slots !== 'object') return;
+      if (typeof slots.inject !== 'function' || typeof slots.register !== 'function') return;
+
+      slots.inject('plugins.item', () => slots.register({
+        name: 'plugins.item',
+        id: 'dsh-autoupdater',
+        order: 30,
+        label: '自动更新',
+      }, Page));
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
-        // 注入一次性的骨架屏动画样式
-        if (typeof document !== 'undefined' && !document.getElementById('dsh-autoupdater-style')) {
-          const el = document.createElement('style');
-          el.id = 'dsh-autoupdater-style';
-          el.textContent = '@keyframes dsw-autoupdater-pulse{0%,100%{opacity:.5}50%{opacity:.15}}';
-          document.head.appendChild(el);
+        try {
+          mount(ctx);
+        } catch (error) {
+          // A throw out of `apply` fails this Loader entry, and because the
+          // package declares `dsh.client.immediately: true` that failure aborts
+          // the whole Web boot. This card is optional UI: log it and stay inert
+          // rather than take the desktop app down.
+          try {
+            console.warn('[dsh-autoupdater] client: panel not mounted', error);
+          } catch (ignored) {
+            /* nothing to do */
+          }
         }
-
-        // 卡片摘要（插件管理器列表里的一行说明）
-        function Summary() {
-          return h('span', { style: { color: T.text2, fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 5 } },
-            h('span', { 'aria-hidden': true }, '⟳'),
-            '自动更新 · 空闲窗口执行 · 点击进入设置');
-        }
-        // 详情页（点开卡片后的完整设置面板）
-        function Page(props) {
-          if (props.view === 'summary') return h(Summary);
-          return h(App);
-        }
-        ctx.slots.inject('plugins.item', () => ctx.slots.register({
-          name: 'plugins.item',
-          id: 'dsh-autoupdater',
-          order: 30,
-          label: '自动更新',
-          locale: 'dsh-autoupdater',
-        }, Page));
       },
     };
   },
