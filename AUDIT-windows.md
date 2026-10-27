@@ -26,7 +26,7 @@ Current code — `main.js:148-155` (the replacement), `main.js:262-266` (all sta
 263:   const statePath = join(stateDir, 'status.json');
 ```
 
-**Proof the stray dir is stale, not a live bug:** the stray `status.json` was created `2026-10-27 06:30:13`, while the current plugin copy (`%DSH_HOME%\profiles\desktop\node_modules\@fffangchenghao\dsh-autoupdater`, version `0.6.3`) was installed `2026-10-27 10:53:39` — i.e. four hours *later*, and 0.6.3 already ships `resolveDshHome()`/`homedir()`. The live Host writes the correct `C:\Users\周新杰\.dsh\autoupdater\status.json`. Action: delete the stray tree, do **not** re-patch home resolution.
+**Proof the stray dir is stale, not a live bug:** the stray `status.json` was created `2026-10-27 06:30:13`, while the current plugin copy (`%DSH_HOME%\profiles\desktop\node_modules\@fffangchenghao\dsh-autoupdater`, version `0.6.3`) was installed `2026-10-27 10:53:39` — i.e. four hours *later*, and 0.6.3 already ships `resolveDshHome()`/`homedir()`. The live Host writes the correct `%USERPROFILE%\.dsh\autoupdater\status.json`. Action: delete the stray tree, do **not** re-patch home resolution.
 
 ## 1. POSIX assumptions in `main.js` with no `process.platform` branch of their own
 
@@ -50,7 +50,7 @@ All six are reachable only through already-guarded callers today; none throws on
 557:   }
 ```
 
-The regex matches only a POSIX `/bin/node`, so on `win32` it is a no-op and the string becomes `D:\deepseek harness\DeepSeek Harness.exe/lib/node_modules/...`; the Windows global root is `%APPDATA%\npm\node_modules` and the launcher is `dsh.cmd`. Failure mode is silent: `readJson()` → `null` → `log('cannot resolve @deepseek-ai/dsh version …')` and the harness check ends.
+The regex matches only a POSIX `/bin/node`, so on `win32` it is a no-op and the string becomes `%LOCALAPPDATA%\Programs\DeepSeek Harness\DeepSeek Harness.exe/lib/node_modules/...`; the Windows global root is `%APPDATA%\npm\node_modules` and the launcher is `dsh.cmd`. Failure mode is silent: `readJson()` → `null` → `log('cannot resolve @deepseek-ai/dsh version …')` and the harness check ends.
 Fix: platform-specific root (`npm root -g` or `join(process.env.APPDATA,'npm','node_modules')` vs POSIX layout) built with `join()`.
 
 **H2 — `main.js:559-566`** — only a `try/catch`, no platform branch.
@@ -72,7 +72,7 @@ On Windows `/proc/...` resolves drive-relative to `C:\proc\self\cmdline` → `EN
 711:           AUTOUPDATE_ARGV: currentArgv().join(' '),
 ```
 
-Consumed at `apply-update.mjs:165` by `.split(/\s+/)`: any path containing a space (this machine: `D:\deepseek harness\...`) is torn apart. Fix: pass `JSON.stringify(argv)` and `JSON.parse` on the other side.
+Consumed at `apply-update.mjs:165` by `.split(/\s+/)`: any path containing a space (for example `%LOCALAPPDATA%\Programs\DeepSeek Harness\...`) is torn apart. Fix: pass `JSON.stringify(argv)` and `JSON.parse` on the other side.
 
 **H4 — `main.js:604-617`** — no platform branch; a `win32`/`darwin` spawn of `sudo` is guaranteed `ENOENT` (handled at `:610`, so it logs instead of throwing).
 

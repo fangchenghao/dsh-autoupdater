@@ -101,6 +101,16 @@ dsh plugin --profile web add github:fangchenghao/dsh-autoupdater
 
 开发机是 macOS；Windows 分支是按 Node/Electron 的跨平台语义改的。0.6.5 已在 Windows 11 + DSH 0.2.1 上验证了客户端加载契约（模块 id 等于包名、单次注册、槽选项）和宿主半边的导入，但**面板 UI 的端到端验证仍未完成**。如果 Windows 上仍失败，请把面板日志和 `%USERPROFILE%\.dsh\autoupdater\history.jsonl` 发到 GitHub issue。
 
+### Windows 面板冒烟（手动）
+
+CI 会在 Linux / macOS / Windows 上跑 `npm test` 的加载契约，但它不能替代桌面 App 的 UI。装完 0.6.6 后请在 Windows 实机做三步：
+
+1. **完整退出并重启** DeepSeek Harness（不是只刷新页面）；
+2. 打开「插件」页，应看到「自动更新」卡片，点开应有设置表单；
+3. 点「立即检查」，确认 `%USERPROFILE%\.dsh\autoupdater\status.json` 更新；若卡片缺失，开 DevTools 看是否有 `import failed` 或 `did not activate`。
+
+面板 UI 目前仍以这次实机冒烟为准；CI 只保证模块 id、单次注册和槽选项这些不变量。
+
 ### 上下文销毁修复（0.6.4）
 
 Cordis 在插件热重载/卸载时会销毁插件上下文。0.6.1 的启动 Promise 可能在销毁后才执行 `reschedule()`，留下一个已失效上下文的定时器；次日 04:30 它会报 `cannot get required service "pluginManager" in inactive context`，而同一时间新实例的插件更新其实已经成功。0.6.4 用 `disposed` 标志在销毁后中止定时器和在途检查，并忽略这种过期上下文错误。
@@ -116,11 +126,18 @@ Cordis 在插件热重载/卸载时会销毁插件上下文。0.6.1 的启动 Pr
 - 换版前的服务预检：`spawnSync` 找不到 `grep` 时不抛错而是返回 `status: null`，原来的 `catch { return true }` 是死代码，会把「服务缺失」误判，进而把一次健康的安装回滚掉。现在只有真正可读的结果才有权否决安装。
 - `AUTOUPDATE_ARGV` 改为 JSON 传递。原来用空格拼接、消费端再 split，任何带空格的路径（macOS 的 `Application Support`、Windows 的 `D:\my apps\`）都会被拆碎。消费端仍兼容旧的空格分隔格式。
 
+### 发布打包（0.6.6）
+
+- `test/loader-contract.mjs` 已纳入 npm `files`，安装后 `npm test` 不再因缺少测试文件失败。
+- Windows 审计文档已脱敏（`%USERPROFILE%` / `%LOCALAPPDATA%` 占位），不再包含本机用户名或安装盘路径。
+- 新增 Linux / macOS / Windows 三平台 CI，运行加载契约测试。
+- **运行时代码与 0.6.5 相同**；0.6.6 只改发布内容、文档和 CI。
+
 ## 维护说明
 
 - 上游项目：[niubi6668889595/dsh-autoupdater](https://github.com/niubi6668889595/dsh-autoupdater)（MIT）。
 - 本分支新增：桌面版 CLI 换版、npmmirror 优先、跳过 `link:`/git 来源、只有真正升级成功才算“已应用”、Windows 空闲判定/.cmd 调用适配；完整差异见 git log。
-- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.5`。
+- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.6`。
 - 与上游同步：把上游加为 remote，rebase/merge 到本分支后重新发版即可。
 
 ## 安全模型
@@ -135,7 +152,7 @@ Cordis 在插件热重载/卸载时会销毁插件上下文。0.6.1 的启动 Pr
 - 插件更新只覆盖声明 `dsh.bundle` 的 npm 形态插件；GitHub 源码安装的插件版本比对不适用
 - 本体更新依赖 npm 全局安装形态（git checkout 形态请用 [dsh-updater](https://github.com/GodCC6/dsh-updater)；桌面 App 不参与本体更新，由 App 自带更新器负责）
 - 空闲判定基于本机 `$DSH_HOME/sessions` 的文件 mtime，远程会话（SSH 场景）不计入
-- Windows 原生环境尚未实机验证（0.6.2 已移除 Unix-only 依赖，仍建议先看面板日志确认 desktop CLI 路径）
+- Windows 11 已实机验证 client 加载契约和宿主导入；面板 UI 仍需按上面的三步手动冒烟（CI 只跑契约测试）
 
 ## 致谢
 
@@ -163,6 +180,6 @@ MIT
 
 Install: `dsh plugin --profile web add @fffangchenghao/dsh-autoupdater` (or `github:fangchenghao/dsh-autoupdater`), then restart DSH and configure under **Plugin Manager → dsh-autoupdater**.
 
-**Windows (0.6.2+)**: the desktop path is shared with macOS. 0.6.2 removes the Unix `find` idle check, invokes `dsh.cmd` through `cmd.exe`, falls back to `homedir()` when `HOME` is absent, and leaves DSH core updates to the installer/app. Windows has not been tested end-to-end on a real machine yet; logs are welcome in GitHub issues.
+**Windows (0.6.2+)**: the desktop path is shared with macOS. 0.6.2 removes the Unix `find` idle check, invokes `dsh.cmd` through `cmd.exe`, falls back to `homedir()` when `HOME` is absent, and leaves DSH core updates to the installer/app. Windows 11 has been used to verify the client-loader contract and host-side import; the panel UI still needs the three-step smoke test above. CI runs the contract test on Linux, macOS and Windows.
 
 See the Chinese sections above for full details — the configuration table and idle-detection notes apply to both languages.
