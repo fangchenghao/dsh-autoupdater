@@ -670,7 +670,7 @@ export function apply(ctx, rawConfig = {}) {
     const envPairs = [
       ['AUTOUPDATE_STATE_DIR', stateDir],
       ['AUTOUPDATE_SYSTEMD_UNIT', unit],
-      ['AUTOUPDATE_ARGV', currentArgv().join(' ')],
+      ['AUTOUPDATE_ARGV', JSON.stringify(currentArgv())],
     ];
 
     let launched = false;
@@ -708,7 +708,7 @@ export function apply(ctx, rawConfig = {}) {
           ...process.env,
           AUTOUPDATE_STATE_DIR: stateDir,
           AUTOUPDATE_SYSTEMD_UNIT: unit,
-          AUTOUPDATE_ARGV: currentArgv().join(' '),
+          AUTOUPDATE_ARGV: JSON.stringify(currentArgv()),
         },
       });
       child.unref();

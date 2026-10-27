@@ -115,6 +115,15 @@ function serviceExistsInInstall(name) {
   try {
     const nm = `${globalRoot}/node_modules/@deepseek-ai`;
     const r = spawnSync('grep', ['-rl', '--include=*.js', name, nm], { encoding: 'utf8' });
+    // `spawnSync` does NOT throw when the executable is missing — it returns
+    // `{ status: null, error }` with a null stdout. A `try/catch` alone would
+    // therefore never see ENOENT, every service would read as "missing", and
+    // the precheck below would roll a perfectly healthy install back to the
+    // previous version. Only an inspectable result may veto an install:
+    //   grep 0 = matched, 1 = no match, anything else = could not inspect.
+    if (r === null || r === undefined || r.error) return true;
+    if (typeof r.status !== 'number') return true;
+    if (r.status !== 0 && r.status !== 1) return true;
     return (r.stdout || '').trim() !== '';
   } catch { return true; }
 }
@@ -149,6 +158,21 @@ if (!installOk) {
 ahistory({ kind: 'harness-installed', from: instruction.from, to: instruction.tag, applied: newVer });
 
 // ───────── 4. 重启 ─────────
+// `AUTOUPDATE_ARGV` 由 main.js 写入。旧生产者用空格拼接，任何带空格的路径
+// （macOS 的 `~/Library/Application Support/…`、Windows 的 `D:\my apps\…`）
+// 都会在重启时被拆成几个不存在的参数。新生产者写 JSON，这里两种都能读。
+function parseAutoUpdateArgv() {
+  const raw = (process.env.AUTOUPDATE_ARGV || '').trim();
+  if (!raw) return [];
+  if (raw.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')) return parsed;
+    } catch { /* 落到旧格式 */ }
+  }
+  return raw.split(/\s+/).filter(Boolean);
+}
+
 async function restartService() {
   if (unit) {
     try {
@@ -162,7 +186,7 @@ async function restartService() {
       return code === 0;
     } catch (e) { alog(`systemctl restart threw: ${e.message}`); return false; }
   }
-  const argv = (process.env.AUTOUPDATE_ARGV || '').trim().split(/\s+/).filter(Boolean);
+  const argv = parseAutoUpdateArgv();
   if (argv.length >= 2 && existsSync(argv[1])) {
     try {
       const child = spawn(argv[1], argv.slice(2), { detached: true, stdio: 'ignore' });
