@@ -101,11 +101,15 @@ dsh plugin --profile web add github:fangchenghao/dsh-autoupdater
 
 开发机是 macOS；Windows 分支是按 Node/Electron 的跨平台语义改的，并做了逻辑测试，但**尚未在真实 Windows 机器上端到端跑过**。如果 Windows 上仍失败，请把面板日志和 `%USERPROFILE%\.dsh\autoupdater\history.jsonl` 发到 GitHub issue。
 
+### 上下文销毁修复（0.6.4）
+
+Cordis 在插件热重载/卸载时会销毁插件上下文。0.6.1 的启动 Promise 可能在销毁后才执行 `reschedule()`，留下一个已失效上下文的定时器；次日 04:30 它会报 `cannot get required service "pluginManager" in inactive context`，而同一时间新实例的插件更新其实已经成功。0.6.4 用 `disposed` 标志在销毁后中止定时器和在途检查，并忽略这种过期上下文错误。
+
 ## 维护说明
 
 - 上游项目：[niubi6668889595/dsh-autoupdater](https://github.com/niubi6668889595/dsh-autoupdater)（MIT）。
 - 本分支新增：桌面版 CLI 换版、npmmirror 优先、跳过 `link:`/git 来源、只有真正升级成功才算“已应用”、Windows 空闲判定/.cmd 调用适配；完整差异见 git log。
-- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.3`。
+- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.4`。
 - 与上游同步：把上游加为 remote，rebase/merge 到本分支后重新发版即可。
 
 ## 安全模型

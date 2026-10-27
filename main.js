@@ -271,6 +271,12 @@ export function apply(ctx, rawConfig = {}) {
   // 初始配置 = YAML 注入值；运行时覆盖来自 config.json（每次调度/检查前重读）
   let config = normalizeConfig(rawConfig);
 
+  // Cordis 销毁插件上下文后，未完成的异步检查不能再访问 ctx（会抛
+  // "cannot get required service ... in inactive context"），也不能再排下一轮定时器。
+  // 0.6.1 的启动 Promise 在 dispose 后仍会 reschedule()，导致次日 04:30 留下一个
+  // 已销毁上下文的定时器；0.6.4 起用 disposed 统一拦截。
+  let disposed = false;
+
   async function reloadHotConfig() {
     const hot = await readJson(hotConfigPath);
     if (hot) config = normalizeConfig({ ...rawConfig, ...hot });
@@ -393,15 +399,17 @@ export function apply(ctx, rawConfig = {}) {
   /** 等到空闲；true=达成，false=超时。双重采样防瞬时空档误判。 */
   async function waitIdle(maxWaitSec) {
     const deadline = nowSec() + maxWaitSec;
-    while (nowSec() < deadline) {
+    while (!disposed && nowSec() < deadline) {
+      if (disposed) return false;
       if (isIdle()) {
         await sleep(15000);
+        if (disposed) return false;
         if (isIdle()) return true;
         continue;
       }
       await sleep(30000);
     }
-    return isIdle();
+    return !disposed && isIdle();
   }
 
   async function saveState() {
@@ -789,11 +797,13 @@ export function apply(ctx, rawConfig = {}) {
   const ATTEMPT_TTL = 24 * 3600 * 1000;
 
   async function checkAndApplyPlugins(report, { exemptQuiet = false, successes = [] } = {}) {
+    if (disposed) return;
     const pm = ctx.pluginManager;
     if (!pm?.listBundles || !pm?.installBundle) return;
     const now = Date.now();
     for (const [k, ts] of recentAttempts) if (now - ts > ATTEMPT_TTL) recentAttempts.delete(k);
     const bundles = await pm.listBundles();
+    if (disposed) return;
     const items = (bundles ?? []).filter((b) => {
       if (!b?.installed || !b?.removable) return false;
       if (b.name === SELF_NAME || b.name === 'dsh-autoupdater') return false;
@@ -813,6 +823,7 @@ export function apply(ctx, rawConfig = {}) {
     let consecutiveNetFails = 0;
     const NET_FAIL_LIMIT = 4;
     for (const b of items) {
+      if (disposed) return;
       if (consecutiveNetFails >= NET_FAIL_LIMIT) {
         report.push(`⚠ 连续 ${NET_FAIL_LIMIT} 个包网络超时，中止本轮（网络恢复后下轮自动重试）`);
         break;
@@ -821,6 +832,7 @@ export function apply(ctx, rawConfig = {}) {
       if (decision === 'skip') continue;
       try {
         const latest = await npmLatestVersion(b.name);
+        if (disposed) return;
         consecutiveNetFails = 0;
         if (!latest || !semverGt(latest, b.version)) continue;
         const key = `${b.name}@${latest}`;
@@ -858,6 +870,7 @@ export function apply(ctx, rawConfig = {}) {
               : { application: 'failed', error: { code: 'cli-failed', diagnostic: cli.reason } };
           }
         }
+        if (disposed) return;
         // 装完回读磁盘真实版本验证，不再信返回值
         let diskVer = null;
         if (profileDir) {
@@ -897,6 +910,7 @@ export function apply(ctx, rawConfig = {}) {
           report.push(`  ⚠ ${b.name} 已写到 ${diskVer}，但 CLI 收尾报错（退出码 ${result?.error?.code === 'cli-failed' ? '非 0' : '?'}）——重启后确认`);
         }
       } catch (e) {
+        if (/inactive context/i.test(String(e?.message ?? e))) { disposed = true; return; }
         log(`plugin check ${b.name} failed:`, e?.message);
         consecutiveNetFails++;
       }
@@ -908,10 +922,11 @@ export function apply(ctx, rawConfig = {}) {
   let running = false;
 
   async function runCheck(trigger) {
-    if (running) return;
+    if (disposed || running) return;
     running = true;
     try {
       await reloadHotConfig();
+      if (disposed) return;
       log(`check start (${trigger})`);
       state.lastRun = new Date().toISOString();
 
@@ -921,13 +936,14 @@ export function apply(ctx, rawConfig = {}) {
         // 有会话运行 → 轮询等待其结束，最多 idleTimeoutMinutes。
         const deadline = nowSec() + config.idleTimeoutMinutes * 60;
         got = false;
-        while (nowSec() < deadline) {
+        while (!disposed && nowSec() < deadline) {
           if (!anyAgentRunning()) { got = true; break; }
           await sleep(10000);
         }
       } else {
         got = await waitIdle(config.idleTimeoutMinutes * 60);
       }
+      if (disposed) return;
       if (!got) {
         log('idle window not reached, skip this round');
         state.lastRun += ' (skipped: busy)';
@@ -938,6 +954,7 @@ export function apply(ctx, rawConfig = {}) {
       const report = [];
       const successes = [];
       await checkAndApplyPlugins(report, { exemptQuiet: trigger === 'manual', successes });
+      if (disposed) return;
       try {
         await checkHarness(report);
       } catch (e) {
@@ -946,15 +963,18 @@ export function apply(ctx, rawConfig = {}) {
         log('harness check failed (network):', e?.message);
       }
 
+      if (disposed) return;
       // 桌面 App 不能从进程内部重启：把“需要重启才生效”写进本轮结果，面板里直接可见。
       // 只统计真正成功的 upgrade（successes），失败/跳过/仅通知的版本行不算。
       if (successes.length > 0 && isDesktopApp()) {
         report.push('  ⏻ 插件已更新到磁盘，重启 DeepSeek Harness 后生效');
       }
 
+      if (disposed) return;
       state.updates = report;
       state.lastError = null;
       await saveState();
+      if (disposed) return;
       await appendHistory({ kind: 'check', trigger, findings: report });
       log('check done:', report.length ? report : 'no updates');
 
@@ -985,6 +1005,11 @@ export function apply(ctx, rawConfig = {}) {
         return;
       }
     } catch (e) {
+      if (/inactive context/i.test(String(e?.message ?? e))) disposed = true;
+      if (disposed) {
+        log('check aborted (plugin context disposed)');
+        return;
+      }
       log('check error:', e?.message ?? e);
       state.lastError = String(e?.message ?? e);
       await appendHistory({ kind: 'error', trigger, message: String(e?.message ?? e) });
@@ -996,6 +1021,7 @@ export function apply(ctx, rawConfig = {}) {
   // ---- 宽限期 tick ----
   let applyingHarness = false;
   async function tick() {
+    if (disposed) return;
     try {
       if (!harnessNotice || config.harnessMode !== 'auto') return;
       if (applyingHarness) return;
@@ -1014,13 +1040,15 @@ export function apply(ctx, rawConfig = {}) {
   let graceTimer = null;
 
   function reschedule() {
+    if (disposed) return;
     if (scheduleTimer) { clearTimeout(scheduleTimer); scheduleTimer = null; }
     const at = nextRunAt(config);
     if (!(at > 0)) return;
     const delay = Math.max(1000, at - Date.now());
     scheduleTimer = setTimeout(() => {
+      if (disposed) return;
       runCheck(config.scheduleMode).catch(() => {});
-      reschedule();
+      if (!disposed) reschedule();
     }, delay);
     scheduleTimer.unref?.();
     const when = new Date(at).toLocaleString('zh-CN', { hour12: false });
@@ -1045,6 +1073,7 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   async function installedPluginNames() {
+    if (disposed) return [];
     try {
       const bundles = await ctx.pluginManager.listBundles();
       return (bundles ?? [])
@@ -1137,6 +1166,7 @@ export function apply(ctx, rawConfig = {}) {
         kind: 'exact',
         path: '/api/autoupdater/run-now',
         handler: async (_req, res) => {
+          if (disposed) { sendJson(res, 410, { ok: false, error: 'plugin disposed' }); return; }
           if (running) { sendJson(res, 200, { ok: true, queued: false, reason: 'already-running' }); return; }
           runCheck('manual').catch(() => {});
           sendJson(res, 200, { ok: true, queued: true });
@@ -1148,15 +1178,18 @@ export function apply(ctx, rawConfig = {}) {
 
   // ---- 启动 ----
   reloadHotConfig().then(() => {
+    if (disposed) return;
     reschedule();
+    if (disposed) return;
     graceTimer = setInterval(tick, 30000);
     graceTimer.unref?.();
-  }).catch((e) => log('startup reload failed:', e?.message));
+  }).catch((e) => { if (!disposed) log('startup reload failed:', e?.message); });
 
   // ---- 清理 ----
   return () => {
-    if (scheduleTimer) clearTimeout(scheduleTimer);
-    if (graceTimer) clearInterval(graceTimer);
+    disposed = true;
+    if (scheduleTimer) { clearTimeout(scheduleTimer); scheduleTimer = null; }
+    if (graceTimer) { clearInterval(graceTimer); graceTimer = null; }
     for (const d of disposers) { try { d?.(); } catch {} }
   };
 }

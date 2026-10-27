@@ -1,6 +1,6 @@
 {
   "name": "@fffangchenghao/dsh-autoupdater",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "type": "module",
   "license": "MIT",
   "description": "Maintained fork of dsh-autoupdater with macOS/Windows desktop fixes. Scheduled update checks for DSH itself and installed plugins, applied only in idle windows.",
