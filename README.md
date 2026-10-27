@@ -99,17 +99,28 @@ dsh plugin --profile web add github:fangchenghao/dsh-autoupdater
 - Windows 上不执行 DSH 本体更新（交给安装器/App 自带更新器），插件换版后同样只提示重启。
 - **多 profile 选择**：优先使用桌面 App 注入的 `DSH_PROFILE_DIR` / `DSH_PROFILE`；桌面版在两者都缺失时默认 `desktop`，不会因为某个测试 profile 的 `node_modules` 更新时间更近而误选。
 
-开发机是 macOS；Windows 分支是按 Node/Electron 的跨平台语义改的，并做了逻辑测试，但**尚未在真实 Windows 机器上端到端跑过**。如果 Windows 上仍失败，请把面板日志和 `%USERPROFILE%\.dsh\autoupdater\history.jsonl` 发到 GitHub issue。
+开发机是 macOS；Windows 分支是按 Node/Electron 的跨平台语义改的。0.6.5 已在 Windows 11 + DSH 0.2.1 上验证了客户端加载契约（模块 id 等于包名、单次注册、槽选项）和宿主半边的导入，但**面板 UI 的端到端验证仍未完成**。如果 Windows 上仍失败，请把面板日志和 `%USERPROFILE%\.dsh\autoupdater\history.jsonl` 发到 GitHub issue。
 
 ### 上下文销毁修复（0.6.4）
 
 Cordis 在插件热重载/卸载时会销毁插件上下文。0.6.1 的启动 Promise 可能在销毁后才执行 `reschedule()`，留下一个已失效上下文的定时器；次日 04:30 它会报 `cannot get required service "pluginManager" in inactive context`，而同一时间新实例的插件更新其实已经成功。0.6.4 用 `disposed` 标志在销毁后中止定时器和在途检查，并忽略这种过期上下文错误。
 
+### 客户端模块 id 修复（0.6.5）
+
+`client.js` 通过 `window.__ModuleLoader__.load({ id })` 注册自己，而 `@deepseek-ai/dsh-client-modules` 给启动图里每一行取的名字就是**包名**。项目改名到 `@fffangchenghao/dsh-autoupdater` 后，`client.js` 仍注册短 id `dsh-autoupdater`，于是启动图去取 `@fffangchenghao/dsh-autoupdater` 时找不到工厂函数，报 `import failed`；又因为清单里是 `dsh.client.immediately: true`，一个客户端入口启动失败会中止整个 Web boot，桌面版直接弹「应用无法启动或已意外停止」。
+
+0.6.5 把 id 改为包名（**必须始终等于 `package.json` 的 `name`**），并给 `require('react')` 与槽位注册加了降级：缺少 peer 或槽契约变化时插件退化为空模块，而不是把整个 App 带下去。同时移除了 `plugins.item` 注册里并不存在的 `locale` 字段。`npm test` 会校验这些不变量。
+
+### 宿主侧加固（0.6.5）
+
+- 换版前的服务预检：`spawnSync` 找不到 `grep` 时不抛错而是返回 `status: null`，原来的 `catch { return true }` 是死代码，会把「服务缺失」误判，进而把一次健康的安装回滚掉。现在只有真正可读的结果才有权否决安装。
+- `AUTOUPDATE_ARGV` 改为 JSON 传递。原来用空格拼接、消费端再 split，任何带空格的路径（macOS 的 `Application Support`、Windows 的 `D:\my apps\`）都会被拆碎。消费端仍兼容旧的空格分隔格式。
+
 ## 维护说明
 
 - 上游项目：[niubi6668889595/dsh-autoupdater](https://github.com/niubi6668889595/dsh-autoupdater)（MIT）。
 - 本分支新增：桌面版 CLI 换版、npmmirror 优先、跳过 `link:`/git 来源、只有真正升级成功才算“已应用”、Windows 空闲判定/.cmd 调用适配；完整差异见 git log。
-- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.4`。
+- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.5`。
 - 与上游同步：把上游加为 remote，rebase/merge 到本分支后重新发版即可。
 
 ## 安全模型
