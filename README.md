@@ -15,7 +15,7 @@ English below · [English](#english)
 - **双向白名单**：白名单内只提醒 / 白名单内自动升级，两种语义随你切换
 - **DSH 本体更新**：三种策略——不管 / 只暂存+通知 / 通知后宽限自动重启（宽限期内任何会话活动即推迟）
 - **Web 设置面板**：插件管理器内嵌卡片，改配置保存即生效（热配置，无需重启）
-- **最近活动日志**：每次检查/更新/重启都有可读记录，面板内直接查看
+- **最近活动日志**：每次检查/更新/重启都有可读记录，面板内直接查看；时间显示为 `YYYY-MM-DD HH:mm:ss`，不会只看到当天时分秒
 - **防变砖检查**：本体更新后校验 dsh 二进制存在才重启，npm 中断不留半更新状态
 
 ## 安装
@@ -133,11 +133,15 @@ Cordis 在插件热重载/卸载时会销毁插件上下文。0.6.1 的启动 Pr
 - 新增 Linux / macOS / Windows 三平台 CI，运行加载契约测试。
 - **运行时代码与 0.6.5 相同**；0.6.6 只改发布内容、文档和 CI。
 
+### 活动日志时间（0.6.7）
+
+- 「最近活动」每条记录的时间由 `HH:mm:ss` 改为 `YYYY-MM-DD HH:mm:ss`，跨天查看历史时不再需要猜日期；仍按本机时区显示。
+
 ## 维护说明
 
 - 上游项目：[niubi6668889595/dsh-autoupdater](https://github.com/niubi6668889595/dsh-autoupdater)（MIT）。
 - 本分支新增：桌面版 CLI 换版、npmmirror 优先、跳过 `link:`/git 来源、只有真正升级成功才算“已应用”、Windows 空闲判定/.cmd 调用适配；完整差异见 git log。
-- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.6`。
+- 发布渠道：npm `@fffangchenghao/dsh-autoupdater`，GitHub `fangchenghao/dsh-autoupdater`，tag `v0.6.7`。
 - 与上游同步：把上游加为 remote，rebase/merge 到本分支后重新发版即可。
 
 ## 安全模型

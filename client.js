@@ -337,6 +337,15 @@ window.__ModuleLoader__.load({
       return new Date(ts).toLocaleString('zh-CN', { hour12: false });
     }
 
+    /** 活动日志时间：固定 YYYY-MM-DD HH:mm:ss，避免只看到时分秒时分不清日期 */
+    function formatLogTime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      if (Number.isNaN(d.getTime())) return '';
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+
     // ───────────────────── 最近活动日志 ─────────────────────
 
     /** 一条 history 记录转一行可读日志 */
@@ -383,7 +392,7 @@ window.__ModuleLoader__.load({
         }, shown.slice().reverse().map((e, i) => {
           const { tone, text } = logLine(e);
           const color = tone === 'ok' ? T.success : tone === 'warn' ? T.warn : tone === 'error' ? T.error : T.text3;
-          const t = e.at ? new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+          const t = formatLogTime(e.at);
           return h('div', {
             key: i,
             style: { display: 'flex', gap: 8, fontSize: 12, lineHeight: '18px' },
